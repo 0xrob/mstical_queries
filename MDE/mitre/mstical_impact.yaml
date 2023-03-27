@@ -1,0 +1,98 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_impact", "MDE"]
+  tags: ["mstical_impact","impact"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_email:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  unusual_volume_of_file_deletion_by_risky_user:
+    description: This query looks for users performing file deletion activities. Spikes in file deletion observed from risky sign-in sessions are flagged here. This applies to SharePoint and OneDrive users.
+    metadata:
+    args:
+      query: |-
+        let riskyUsers =
+          AADSignInEventsBeta    
+          | where Timestamp >= datetime({start})
+          | where Timestamp <= datetime({end})
+          | where isnotempty(AccountObjectId) and isnotempty(RequestId)
+          | where ErrorCode == 0
+          | where RiskLevelDuringSignIn >=80
+          | project RiskLevelDuringSignIn, AccountObjectId, Timestamp, SessionId=RequestId
+          ;
+        let hasUsers = isnotempty(toscalar(riskyUsers));
+        let deleteEvents =
+          CloudAppEvents
+          | where hasUsers
+          | where Timestamp >= datetime({start})
+          | where Timestamp <= datetime({end})
+          | where ApplicationId in ({relevantAppIds})
+          | where isnotempty(AccountObjectId)
+          | where AccountObjectId in (riskyUsers)
+          | where ActionType in ({relevantOperations})
+          | extend SessionId= tostring(RawEventData.AppAccessContext.AADSessionId)
+          | where isnotempty(SessionId)
+          | project AccountObjectId, AccountDisplayName, ApplicationId, SessionId, ActionType, Timestamp, ReportId
+          ;   
+        deleteEvents  
+        | join kind=leftsemi riskyUsers on AccountObjectId, SessionId
+        | summarize Count=count() , (Timestamp, ReportId)=arg_min(Timestamp, ReportId) by AccountObjectId, AccountDisplayName, ApplicationId, ActionType, Time=bin(Timestamp, 5m)
+        | summarize TotalCount= countif(Count > 50), (Timestamp, ReportId)=arg_min(Timestamp, ReportId) by AccountObjectId, AccountDisplayName, ApplicationId 
+        | where TotalCount >= 3
+        | project AccountObjectId, AccountDisplayName, ApplicationId, TotalCount, ReportId, Timestamp
+    parameters:
+      relevantOperations:
+        description: list of domains to exclude
+        type: list
+        default:
+          - FileDeleted
+          - FileRecycled
+          - FileDeletedFirstStageRecycleBin
+          - FileDeletedSecondStageRecycleBin
+          - FileVersionsAllMinorsRecycled
+          - FileVersionRecycled
+          - FileVersionsAllRecycled
+      relevantAppIds:
+        description: list of domains to exclude
+        type: list
+        default:
+          - 20892
+          - 15600
+  volume_shadow_copy_deletion:
+    description: This query looks for the deletion of volume shadow copies based on command line pattern matching.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has "shadowcopy" and ProcessCommandLine has "delete"
+        | project DeviceId, Timestamp, InitiatingProcessFileName, FileName,
+        ProcessCommandLine, InitiatingProcessIntegrityLevel, InitiatingProcessParentFileName

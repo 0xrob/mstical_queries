@@ -1,0 +1,167 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_defense_evasion", "MDE"]
+  tags: ["mstical_defense_evasion","defense_evasion"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  mshta_parent_process:
+    description: This query looks for mshta spawning a child process.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        and InitiatingProcessFileName =~ "mshta.exe"
+  process_injection_api_calls_query_from_office_application:
+    description: This query looks for process injection from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+        | where FileName has_any({office_applications})
+    parameters:
+      office_applications:
+        description: office applications.
+        type: list
+        default: 
+        - winword
+        - excel
+        - powerpnt
+        - outlook
+        - onenote
+  process_injection_api_calls_query_from_common_cobalt_strike_spawn_to_application:
+    description: This query looks for process injection from an default cobalt strike spawn to application.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+        | where FileName has_any({cs_spawn_tos})
+    parameters:
+      cs_spawn_tos:
+        description: default cobalt strike spawn to values.
+        type: list
+        default: 
+        - rundll32
+        - dllhost
+        - regsvr32
+        - svchost
+  process_injection_api_calls_query:
+    description: This query looks for process injection from any running process.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+  suspicious_driver_load:
+    description: This query looks for a suspicious driver load (cyb3rm0nk).
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType == "DriverLoad"
+        | distinct SHA1
+        | join kind=inner
+            (
+            DeviceFileCertificateInfo
+            | where CertificateCreationTime < todatetime("7/30/2015") or CertificateExpirationTime < todatetime("7/30/2015")
+            ) on SHA1
+            | summarize dcount(DeviceId) by SHA1
+            | where dcount_DeviceId <= {dcount_device_id}
+            | invoke FileProfile(SHA1,1000)
+            | where GlobalPrevalence <= {global_prevalence}
+            | join DeviceFileCertificateInfo on SHA1
+    parameters:
+      dcount_device_id:
+        description: use prevalence. assuming malicious driver has been installed on max 5 machines.
+        type: int
+        default: 5
+      global_prevalence:
+        description: use prevalence. assuming malicious driver has not been observed over 500 times.
+        type: int
+        default: 500
+  potential_dll_hijacking:
+    description: This query looks for potential hijacking. Credit to Cyb3rMonk
+    metadata:
+    args:
+      query: |-
+        let HijackLibs = externaldata(DLLName:string, ExpectedLocation:string, Process: string )
+        [@"https://github.com/Cyb3r-Monk/Threat-Hunting-and-Detection/raw/main/Defense%20Evasion/HijackLibs.csv"]
+        with (format="csv", ignoreFirstRecord=True);
+        HijackLibs
+        | join hint.strategy=shuffle kind=rightsemi(
+            DeviceImageLoadEvents
+            | extend DLLDir =  case(FolderPath startswith "C:\\windows\\system32\\driverstore\\filerepository\\prnms002.inf", replace_regex(tolower(FolderPath), @'c:\\windows\\system32\\driverstore\\filerepository\\prnms002\.inf_.*\\amd64', @'%SYSTEM32%\\driverstore\\filerepository\\prnms002.inf_%VERSION%\\amd64'),
+                                    FolderPath has_all ('Windows Kits', 'bin', 'x86'), '%PROGRAMFILES%\\windows kits\\10\\bin\\%VERSION%\\x86',
+                                    FolderPath has_all ('Windows Kits', 'bin', 'x64'), '%PROGRAMFILES%\\windows kits\\10\\bin\\%VERSION%\\x64',
+                                    FolderPath has_all ('Windows Kits', 'bin', 'arm64'), '%PROGRAMFILES%\\Windows Kits\\10\\bin\\%VERSION%\\arm64',
+                                    FolderPath has_all ('Program Files', 'Edge', 'Application'),  tolower('%PROGRAMFILES%\\microsoft\\edge\\application\\%VERSION%'),
+                                    FolderPath has_all ('Program Files', 'Microsoft Office', 'root'),  tolower('%PROGRAMFILES%\\microsoft office\\root\\office%VERSION%'),
+                                    FolderPath contains '\\Microsoft Office\\Office',  tolower('%PROGRAMFILES%\\Microsoft Office\\OFFICE%VERSION%'),
+                                    FolderPath has_all ('ProgramData', 'Microsoft', 'Windows Defender', 'Platform'), tolower('%PROGRAMDATA%\\Microsoft\\Windows Defender\\Platform\\%VERSION%'),
+                                    FolderPath startswith "C:\\Program Files (x86)", tolower(replace_string(tolower(FolderPath), 'c:\\program files (x86)', '%programfiles%')),
+                                    FolderPath startswith "C:\\Program Files", tolower(replace_string(tolower(FolderPath), 'c:\\program files', '%programfiles%')),
+                                    FolderPath startswith "C:\\WINDOWS\\SysWow64", tolower(replace_string(tolower(FolderPath), 'c:\\windows\\syswow64', '%syswow64%')),
+                                    FolderPath startswith "C:\\WINDOWS\\System32", tolower(replace_string(tolower(FolderPath), 'c:\\windows\\system32', '%system32%')),
+                                    FolderPath startswith "C:\\ProgramData", tolower(replace_string(tolower(FolderPath), 'c:\\programdata', '%programdata%')),
+                                    FolderPath has "AppData\\Local", tolower(replace_regex(tolower(FolderPath), @'c:\\users\\.*\\appdata\\local', '%localappdata%')),
+                                    FolderPath has "AppData\\Roaming", tolower(replace_regex(tolower(FolderPath), @'c:\\users\\.*\\appdata\\roaming', '%appdata%')),
+                                    tolower(FolderPath)),
+                    Process = case( InitiatingProcessFolderPath has_all ('WindowsApps', 'msteams.exe'), tolower('%PROGRAMFILES%\\WindowsApps\\MicrosoftTeams%VERSION%\\msteams.exe'),
+                                    InitiatingProcessFolderPath has_all ('Windows Kits', 'x86', 'oleview.exe'), tolower('%PROGRAMFILES%\\Windows Kits\\10\\bin\\%VERSION%\\x86\\oleview.exe'),
+                                    InitiatingProcessFolderPath has_all ('Windows Kits', 'x64', 'oleview.exe'), tolower('%PROGRAMFILES%\\Windows Kits\\10\\bin\\%VERSION%\\x64\\oleview.exe'),
+                                    InitiatingProcessFolderPath has_all ('Windows Kits', 'arm64', 'oleview.exe'), tolower('%PROGRAMFILES%\\Windows Kits\\10\\bin\\%VERSION%\\arm64\\oleview.exe'),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'trend micro', 'pwmsvc.exe'), tolower('%PROGRAMFILES%\\trend micro\\passwordmanager\\pwmsvc.exe'),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'trend micro', 'coreserviceshell.exe'), tolower('%PROGRAMFILES%\\trend micro\\amsp\\coreserviceshell.exe'),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'EdgeWebView', 'Application', 'msedgewebview2.exe'),  tolower('%PROGRAMFILES%\\Microsoft\\EdgeWebView\\Application\\%VERSION%\\msedgewebview2.exe'),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'Microsoft Office', 'root'),  tolower(replace_regex(InitiatingProcessFolderPath, @'.*?\\Microsoft Office\\root\\Office.*\\(.*)', @'%PROGRAMFILES%\\Microsoft Office\\root\\Office%VERSION%\\\1')),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'Microsoft Office', 'outlook.exe'),  tolower('%PROGRAMFILES%\\Microsoft Office\\OFFICE%VERSION%\\outlook.exe'),
+                                    InitiatingProcessFolderPath has_all ('Program Files', 'Microsoft', 'Windows Defender', 'MsMpEng'),   tolower('%PROGRAMDATA%\\Microsoft\\Windows Defender\\Platform\\%VERSION%\\MsMpEng.exe'),
+                                    InitiatingProcessFolderPath startswith "C:\\Program Files (x86)", tolower(replace_string(tolower(InitiatingProcessFolderPath), 'c:\\program files (x86)', '%programfiles%')),
+                                    InitiatingProcessFolderPath startswith "C:\\Program Files", tolower(replace_string(tolower(InitiatingProcessFolderPath), 'c:\\program files', '%programfiles%')),
+                                    InitiatingProcessFolderPath startswith "C:\\WINDOWS", tolower(replace_string(tolower(InitiatingProcessFolderPath), 'c:\\windows', '%windir%')),
+                                    InitiatingProcessFolderPath startswith "C:\\WINDOWS\\System32", tolower(replace_string(tolower(InitiatingProcessFolderPath), 'c:\\windows\\system32', '%system32%')),
+                                    InitiatingProcessFolderPath startswith "C:\\ProgramData", tolower(replace_string(tolower(InitiatingProcessFolderPath), 'c:\\programdata', '%programdata%')),
+                                    InitiatingProcessFolderPath has "AppData\\Local", tolower(replace_regex(tolower(InitiatingProcessFolderPath), @'c:\\users\\.*\\appdata\\local', '%localappdata%')),
+                                    InitiatingProcessFolderPath has "AppData\\Roaming", tolower(replace_regex(tolower(InitiatingProcessFolderPath), @'c:\\users\\.*\\appdata\\roaming', '%appdata%')),
+                                    tolower(InitiatingProcessFolderPath)),
+                    DLLName = tolower(FileName)
+            )
+            on Process, DLLName
+            | extend DLLDir = tostring(parse_path(DLLDir).DirectoryPath)
+            | join kind=leftanti HijackLibs on Process, DLLName, $left.DLLDir==$right.ExpectedLocation

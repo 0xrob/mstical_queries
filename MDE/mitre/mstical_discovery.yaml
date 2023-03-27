@@ -1,0 +1,510 @@
+metadata:
+  version: 1
+  description: MDE Queries based on discovery queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_discovery", "MDE"]
+  tags: ["mstical_discovery","discovery"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1-[]
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional query clause e.g project
+      type: str
+      default: ""
+sources:
+  potential_port_scan:
+    description: Look for high volume queries against a given RemoteIP, per DeviceName, RemotePort and Process. Change the Timestamp window according your preference/objective.
+    metadata:
+    args:
+      query: |-
+        let remotePortCountThreshold = 10;
+        {table_network}
+        | where Timestamp >= datetime({start}) and Timestamp <= datetime({end}) and RemoteIP startswith "172.16" or RemoteIP startswith "192.168" or RemoteIP startswith "10.0" 
+        | summarize
+            by DeviceName, RemoteIP, RemotePort, InitiatingProcessFileName
+        | summarize RemotePortCount=dcount(RemotePort) by DeviceName, RemoteIP, InitiatingProcessFileName
+        | where RemotePortCount > remotePortCountThreshold
+  net_recon_activity:
+    description: Look for net.exe recon activity.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any('net.exe','net1.exe') and AccountName != "" and ProcessCommandLine !contains '\\'  and ProcessCommandLine !contains '/add' 
+        | where (ProcessCommandLine contains ' user ' or ProcessCommandLine contains ' group ' or ProcessCommandLine contains 'view') and (ProcessCommandLine has_any(' /do'))
+        | extend Target = extract("(?i)[user|group] (\"*[a-zA-Z0-9-_ ]+\"*)", 1, ProcessCommandLine) | filter Target  != '' 
+        | project AccountName, Target, ProcessCommandLine, DeviceName, Timestamp  
+        | sort by AccountName, Target
+  nltest_recon_activity:
+    description: Look for nltest recon activity.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName == 'nltest.exe' or ProcessCommandLine contains 'domain_trusts'
+  dsquery_recon_activity:
+    description: Look for dsquery recon activity.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName == 'dsquery.exe'
+  ldap_recon_activity:
+    description: Look for ldap recon activity.
+    metadata:
+    args:
+      query: |-
+        let BinTime = {bin_time};
+        IdentityQueryEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | summarize NumberOfLdapQueries = count(), NumberOfDistinctLdapQueries = dcount(SearchFilter) by DeviceName, bin(Timestamp, BinTime)
+        | where NumberOfDistinctLdapQueries > {threshold} 
+    parameters:
+      threshold:
+        description: threshold of ldap queries
+        type: int
+        default: 10
+      bin_time:
+        description: threshold of ldap queries
+        type: str
+        default: "1m"
+  sensitive_ldap_recon_activity:
+    description: Look for sensitive ldap recon activity.
+    metadata:
+    args:
+      query: |-
+        let SensitiveObjects = "[\"Administrators\", \"Domain Controllers\", \"Domain Admins\", \"Account Operators\", \"Backup Operators\", \"DnsAdmin\", \"Enterprise Admins\", \"Group Policy Creator Owners\"]";
+        let ASREP_ROASTING = "userAccountControl:1.2.840.113556.1.4.803:=4194304";
+        let ASREP_ROASTING1 = "userAccountControl|4194304";
+        let ASREP_ROASTING2 = "userAccountControl&4194304";
+        let KERBEROASTING = "serviceprincipalname=*";
+        let BinTime = {bin_time};
+        let SensitiveQueries = (
+        IdentityQueryEvents
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | where SensitiveObjects contains QueryTarget or SearchFilter contains "admincount=1");
+        let Roasting = (
+        IdentityQueryEvents
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | where SearchFilter contains ASREP_ROASTING or
+        SearchFilter contains ASREP_ROASTING1 or
+        SearchFilter contains ASREP_ROASTING2 or
+        SearchFilter contains KERBEROASTING);
+        union SensitiveQueries, Roasting
+        | summarize NumberOfLdapQueries = count(), NumberOfDistinctLdapQueries = dcount(SearchFilter) by DeviceName, bin(Timestamp, BinTime)
+        | where NumberOfDistinctLdapQueries > {threshold} 
+    parameters:
+      threshold:
+        description: threshold of ldap queries
+        type: int
+        default: 10
+      bin_time:
+        description: threshold of ldap queries
+        type: str
+        default: "1m"
+  sensitive_ldap_recon_activity_no_time_filter:
+    description: Look for sensitive ldap recon activity with no time filter.
+    metadata:
+    args:
+      query: |-
+        let SensitiveObjects = "[\"Administrators\", \"Domain Controllers\", \"Domain Admins\", \"Account Operators\", \"Backup Operators\", \"DnsAdmin\", \"Enterprise Admins\", \"Group Policy Creator Owners\"]";
+        IdentityQueryEvents
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | where SensitiveObjects contains QueryTarget or SearchFilter contains "admincount=1"
+  ldap_password_search_activity:
+    description: Look for sensitive ldap recon activity attempting to locate passwords.
+    metadata:
+    args:
+      query: |-
+        let PersonObject = "objectCategory=person";
+        let UserClass = "objectClass=user";
+        let SamAccountUser = "samAccountType=805306368";
+        let Description = "description=*pass*";
+        let Comment = "comment=*pass*";
+        IdentityQueryEvents
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | where (SearchFilter contains Description or SearchFilter contains Comment) and
+        (SearchFilter contains PersonObject or SearchFilter contains UserClass or SearchFilter contains SamAccountUser)
+  kerberoasting_detection_ldap:
+    description: Look for kerberoasting activity.
+    metadata:
+    args:
+      query: |-
+        let ASREP_ROASTING = "userAccountControl:1.2.840.113556.1.4.803:=4194304";
+        let ASREP_ROASTING1 = "userAccountControl|4194304";
+        let ASREP_ROASTING2 = "userAccountControl&4194304";
+        let KERBEROASTING = "serviceprincipalname=*";
+        let LDAP_PORT = 389;
+        let ExcludeNtAuthorityProcess = true;
+        let AzureAtpLdap = (
+        IdentityQueryEvents
+        | where ActionType == "LDAP query"
+        | parse Query with * "Search Scope: " SearchScope ", Base Object:" BaseObject ", Search Filter: " SearchFilter
+        | where SearchFilter contains ASREP_ROASTING or
+        SearchFilter contains ASREP_ROASTING1 or
+        SearchFilter contains ASREP_ROASTING2 or
+        SearchFilter contains KERBEROASTING
+        | extend Time = bin(Timestamp, 1s)
+        | extend DeviceNameWithoutDomain = tolower(tostring(split(DeviceName, '.')[0])));
+        let MDAtpNetworkToProcess = (
+        {table_network}
+        | extend DeviceNameWithoutDomain = tolower(tostring(split(DeviceName, '.')[0]))
+        | where RemotePort == LDAP_PORT
+        | extend Time = bin(Timestamp, 1s)
+        | extend isExclude = iff( ExcludeNtAuthorityProcess and InitiatingProcessAccountDomain == "nt authority" , true, false));
+        AzureAtpLdap
+        | join kind=leftouter (
+        MDAtpNetworkToProcess ) on DeviceNameWithoutDomain, Time 
+        | where isExclude == false or isnull(isExclude)
+  smb_port_discovery:
+    description: Look for SMB port sweep.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where RemotePort == 445
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessId !in (0, 4)
+        | summarize RemoteIPCount=dcount(RemoteIP) by DeviceName, InitiatingProcessFileName, InitiatingProcessId, InitiatingProcessCreationTime
+        | where RemoteIPCount > {threshold}
+    parameters:
+      threshold:
+        description: threshold of scan
+        type: int
+        default: 10
+  ssh_port_discovery:
+    description: Look for SSH port sweep.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where RemotePort == 22
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessId !in (0, 4)
+        | summarize RemoteIPCount=dcount(RemoteIP) by DeviceName, InitiatingProcessFileName, InitiatingProcessId, InitiatingProcessCreationTime
+        | where RemoteIPCount > {threshold}
+    parameters:
+      threshold:
+        description: threshold of scan
+        type: int
+        default: 10
+  rdp_port_discovery:
+    description: Look for RDP port sweep.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where RemotePort == 3389
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessId !in (0, 4)
+        | summarize RemoteIPCount=dcount(RemoteIP) by DeviceName, InitiatingProcessFileName, InitiatingProcessId, InitiatingProcessCreationTime
+        | where RemoteIPCount > {threshold}
+    parameters:
+      threshold:
+        description: threshold of scan
+        type: int
+        default: 10
+  winrm_port_discovery:
+    description: Look for WinRM port sweep.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where RemotePort == 5985 or RemotePort == 5986
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessId !in (0, 4)
+        | summarize RemoteIPCount=dcount(RemoteIP) by DeviceName, InitiatingProcessFileName, InitiatingProcessId, InitiatingProcessCreationTime
+        | where RemoteIPCount > {threshold}
+    parameters:
+      threshold:
+        description: threshold of scan
+        type: int
+        default: 10
+  ad_find_process_execution:
+    description: Look for adfind process execution.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has_any({ad_find_params}) or FileName has_any("adfind")
+    parameters:
+      ad_find_params:
+        description: adfind params.
+        type: list
+        default:
+          - adinfo
+          - computers_pwdnotreqd
+          - dcmodes
+          - dclist
+          - Domain Admins
+          - domainlist
+          - dompol
+          - gpodmp
+          - objectcategory
+          - objectcategory=*
+          - objectcategory=computer
+          - objectcategory=person
+          - trustdmp
+  wmic_recon_commands:
+    description: Look for wmic.exe being used for recon.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName contains "wmic" and ProcessCommandLine has_any({wmic_params})
+    parameters:
+      wmic_params:
+        description: wmic params
+        type: list
+        default:
+          - antivirus
+          - call
+          - create
+          - domain
+          - firewall
+          - get
+          - process
+          - product
+  nbtstat_execution:
+    description: Look for nbtstat process execution.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("nbtstat")
+  chcp_execution:
+    description: Look for chcp process execution.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("chcp")
+  process_interacting_with_outlook_folder:
+    description: Look for a process interacting with outlook.
+    metadata:
+    args:
+      query: |-
+        {table_file}
+        | where FolderPath hasprefix "EmailStorage"
+        | where FolderPath has "Outlook"
+        | project FileName, FolderPath, InitiatingProcessFileName,
+        InitiatingProcessCommandLine, DeviceId, Timestamp
+  confidential_file_name_in_command_line_with_dir:
+    description: Look for a potentially confidential file names in the commandline combined with dir.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has_any("dir")
+        | where ProcessCommandLine has_any({confidential_file_names})
+    parameters:
+      confidential_file_names:
+        description: List of Confidential file names
+        type: list
+        default:
+          - password
+          - secret
+          - sysvol
+          - cpassword
+          - private
+          - pwd
+  confidential_file_name_in_command_line_with_reg:
+    description: Look for a potentially confidential file names in the commandline with reg.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has_any("reg")
+        | where ProcessCommandLine has_any({confidential_file_names})
+    parameters:
+      confidential_file_names:
+        description: List of Confidential file names
+        type: list
+        default:
+          - password
+          - secret
+          - sysvol
+          - cpassword
+          - private
+          - pwd
+  confidential_file_name_in_command_line_with_interpreter:
+    description: Look for a potentially confidential file names in the commandline with interpreters.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any({interpreters})
+        | where ProcessCommandLine has_any({confidential_file_names})
+    parameters:
+      confidential_file_names:
+        description: List of Confidential file names
+        type: list
+        default:
+          - password
+          - secret
+          - sysvol
+          - cpassword
+          - private
+          - pwd
+      interpreters:
+        description: List of interpreters
+        type: list
+        default:
+          - powershell
+          - cmd.exe
+  confidential_file_name_with_findstr:
+    description: Look for a potentially confidential file names in the commandline with interpreters.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("findstr")
+        | where ProcessCommandLine has_any({confidential_file_names})
+    parameters:
+      confidential_file_names:
+        description: List of Confidential file names
+        type: list
+        default:
+          - password
+          - secret
+          - sysvol
+          - cpassword
+          - private
+          - pwd
+  nslookup_and_ping_in_for_loop:
+    description: Look for nslookup or ping in a for loop.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any({processes})
+        | where ProcessCommandLine has_any("for")
+    parameters:
+      processes:
+        description: List of processes.
+        type: list
+        default:
+          - nslookup
+          - ping
+  excessive_recon_process_execution:
+    description: Look for a large amount of recon processes being executed in a short time span on a single host.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any ({recon_processes})
+          | summarize firstEvent=min(Timestamp), lastEvent=max(Timestamp), uniqueProcessNames=dcount(FileName), eventTypes=make_set(ActionType), userNames=make_set(AccountName), userDomains=make_set(AccountDomain), processIds=make_set(ProcessId), processCommandLines=make_set(ProcessCommandLine), parentProcessNames=make_set(InitiatingProcessFileName), parentProcessCommandLines=make_set(InitiatingProcessCommandLine), parentProcessPaths=make_set(InitiatingProcessFolderPath), parentProcessIds=make_set(InitiatingProcessId), grandParentProcessNames=make_set(InitiatingProcessParentFileName), grandParentProcessIds=make_set(InitiatingProcessParentId), parentUserDomain=make_set(InitiatingProcessAccountDomain), parentUserName=make_set(InitiatingProcessAccountName), processCompanyName=make_set(ProcessVersionInfoCompanyName), processProductName=make_set(ProcessVersionInfoProductName), processVersion=make_set(ProcessVersionInfoProductVersion), processInternalFileName=make_set(ProcessVersionInfoInternalFileName), processOriginalFileName=make_set(ProcessVersionInfoOriginalFileName), processFileDescription=make_set(ProcessVersionInfoFileDescription), processSize=make_set(FileSize), processSHA256=make_set(SHA256), reportIds=make_set(ReportId), Timestamp=make_list(Timestamp), count() by DeviceName, DeviceId
+          | order by firstEvent
+          | where uniqueProcessNames > {threshold}
+    parameters:
+      recon_processes:
+        description: List of recon processes
+        type: list
+        default:
+          - arp.exe
+          - at.exe
+          - attrib.exe
+          - bcedit.exe
+          - certutil.exe
+          - copy.exe
+          - cscript.exe
+          - diskpart.exe
+          - driverquery.ex
+          - dsquery.exe
+          - hostname.exe
+          - icacls.exe
+          - ipconfig.exe
+          - nbtstat.exe
+          - net.exe
+          - netsh.exe
+          - netstat.exe
+          - nslookup.exe
+          - ping.exe
+          - pscp.exe
+          - psexec.exe
+          - quser.exe
+          - qwinsta.exe
+          - reg.exe
+          - robocopy.exe
+          - route.exe
+          - runas.exe
+          - sc.exe
+          - schtasks.exe
+          - ssh.exe
+          - systeminfo.exe
+          - taskkill.exe
+          - tasklist.exe
+          - telnet.exe
+          - tracert.exe
+          - ver.exe
+          - vssadmin.exe
+          - wbadmin.exe
+          - wevtutil.exe
+          - wscript.exe
+          - xcopy.exe
+      threshold:
+        description: Threshold to investigate 
+        type: int
+        default: 3
+
+        
+  
+

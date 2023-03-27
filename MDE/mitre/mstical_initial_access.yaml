@@ -1,0 +1,202 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_initial_access", "MDE"]
+  tags: ["mstical_initial_access","initial_access"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    table_email_attachments:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    table_email:
+      description: Table Name
+      type: string
+      default: EmailEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  onenote_file_sent_in_email:
+    description: Looks for unusual file attachments sent via email which could be phishing
+    metadata:
+    args:
+      query: |-
+        {table_email}
+        | where EmailDirection == "Inbound"
+        | join kind=inner ({table_email_attachments}
+             | where FileType == "one;onenote")
+             on NetworkMessageId
+        | project SenderFromAddress, RecipientEmailAddress, Subject, FileName, SHA256
+        | join kind=inner ({table_file}
+             | project DeviceName, SHA256, FolderPath)
+             on SHA256
+  jar_iso_img_file_sent_in_email:
+    description: Looks for unusual file attachments sent via email which could be phishing
+    metadata:
+    args:
+      query: |-
+        {table_email}
+        | where EmailDirection == "Inbound"
+        | join kind=inner ({table_email_attachments}
+             | where FileType has_any("iso","img","jar"))
+             on NetworkMessageId
+        | project SenderFromAddress, RecipientEmailAddress, Subject, FileName, SHA256
+        | join kind=inner ({table_file}
+             | project DeviceName, SHA256, FolderPath)
+             on SHA256
+  link_and_file_download_and_smartscreen:
+    description: Look for links opened from outlook.exe, followed by a browser download and then a SmartScreen app warning that was ignored by the user.
+    metadata:
+    args:
+      query: |-
+        let smartscreenAppWarnings =
+            {table_device}
+            | where ActionType == "SmartScreenAppWarning"
+            | project WarnTime=Timestamp, DeviceName, WarnedFileName=FileName, WarnedSHA1=SHA1, ActivityId=extractjson("$.ActivityId", AdditionalFields, typeof(string))
+            | join kind=leftsemi (
+                    {table_device}
+                    | where ActionType == "SmartScreenUserOverride"
+                    | project DeviceName, ActivityId=extractjson("$.ActivityId", AdditionalFields, typeof(string)))
+                 on DeviceName, ActivityId
+        	| project-away ActivityId;
+        let emailLinksNearSmartScreenWarnings =
+            {table_device}
+            | where ActionType == "BrowserLaunchedToOpenUrl" and isnotempty(RemoteUrl) and InitiatingProcessFileName =~ "outlook.exe"
+            | extend WasOutlookSafeLink=(tostring(parse_url(RemoteUrl).Host) endswith "safelinks.protection.outlook.com")
+            | project DeviceName, MailLinkTime=Timestamp,
+                MailLink=iff(WasOutlookSafeLink, url_decode(tostring(parse_url(RemoteUrl)["Query Parameters"]["url"])), RemoteUrl)
+            | join kind=inner smartscreenAppWarnings on DeviceName | where (WarnTime-MailLinkTime) between (0min..4min);
+        {table_file}
+        | where isnotempty(FileOriginUrl) and InitiatingProcessFileName in~ ("chrome.exe", "browser_broker.exe")
+        | project FileName, FileOriginUrl, FileOriginReferrerUrl, DeviceName, Timestamp, SHA1
+        | join kind=inner emailLinksNearSmartScreenWarnings on DeviceName
+        | where (Timestamp-MailLinkTime) between (0min..3min) and (WarnTime-Timestamp) between (0min..1min)
+        | project FileName, MailLink, FileOriginUrl, FileOriginReferrerUrl, WarnedFileName, DeviceName, SHA1, WarnedSHA1, Timestamp
+        | distinct *
+  detect_img_or_iso_being_mounted:
+    description: Uses lnk creation to identify iso or img files being mounted.
+    metadata:
+    args:
+      query: |-
+        {table_file}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where FileName endswith ".iso.lnk" or FileName endswith ".img.lnk"
+  process_creation_mounted_image:
+    description: Look for processes being spawned from a mounted image.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+                | where Timestamp >= datetime({start})
+                | where Timestamp <= datetime({end}) 
+        | where ActionType == "RegistryValueSet" and RegistryKey == @"HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices" and RegistryValueName startswith @"\DosDevices\"
+        | extend Folder = toupper(replace(@'\\DosDevices\\(\w:)',@'\1',RegistryValueName))
+        | join kind=inner 
+            (
+            {table_process}
+            | where Timestamp >= datetime({start})
+            | where Timestamp <= datetime({end}) 
+            | extend Folder = toupper(replace(@'(\w:)\\.*',@'\1',FolderPath))
+            ) on DeviceId, Folder
+  process_creation_mounted_image_with_network_communications:
+    description: Look for processes being spawned from a mounted image and a network connection.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType == "RegistryValueSet" and RegistryKey == @"HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices" and RegistryValueName startswith @"\DosDevices\"
+        | extend Folder = toupper(replace(@'\\DosDevices\\(\w:)',@'\1',RegistryValueName)) // Extract the folder name
+        | join kind=inner 
+            (
+            {table_network}
+            | where Timestamp >= datetime({start})
+            | where Timestamp <= datetime({end}) 
+            | extend Folder = toupper(replace(@'(\w:)\\.*',@'\1',InitiatingProcessFolderPath))
+            ) on DeviceId, Folder
+  file_extension_observed_from_http_get_request:
+    description: Look for processes being spawned from a mounted image and a network connection.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where ActionType == "NetworkSignatureInspected"
+        | extend
+             SignatureName = tostring(parse_json(AdditionalFields).SignatureName),
+             SignatureMatchedContent = tostring(parse_json(AdditionalFields).SignatureMatchedContent),
+             SamplePacketContent = tostring(parse_json(AdditionalFields).SamplePacketContent)
+        | where SignatureName == "HTTP_Client"
+        | extend HTTP_Request_Method = tostring(split(SignatureMatchedContent, " /", 0)[0])
+        | where HTTP_Request_Method == "GET"
+        | extend DownloadedContent = extract(@'.*/(.*)HTTP', 1, SignatureMatchedContent)
+        | extend DownloadContentFileExtention = extract(@'.*\.(.*)$', 1, DownloadedContent)
+        // limit DownloadContentFileExtention size to reduce false positives
+        | where isnotempty(DownloadContentFileExtention) and string_size(DownloadContentFileExtention) < {DownloadContentFileExtention_count}
+        | summarize count() by DownloadContentFileExtention
+        | sort by count_
+    parameters:
+      DownloadContentFileExtention_count:
+        description: Limit DownloadContentFileExtention size to reduce false positives.
+        type: int
+        default: 8
+  executable_file_extension_observed_from_http_get_request:
+    description: Look for processes being spawned from a mounted image and a network connection.
+    metadata:
+    args:
+      query: |-
+        let ExecutableFileExtentions = dynamic(['bat', 'cmd', 'com', 'cpl', 'ex', 'exe', 'jse', 'lnk','msc', 'ps1', 'reg', 'vb', 'vbe', 'ws', 'wsf']);
+        {table_network}
+        | where ActionType == "NetworkSignatureInspected"
+        | extend
+             SignatureName = tostring(parse_json(AdditionalFields).SignatureName),
+             SignatureMatchedContent = tostring(parse_json(AdditionalFields).SignatureMatchedContent),
+             SamplePacketContent = tostring(parse_json(AdditionalFields).SamplePacketContent)
+        | where SignatureName == "HTTP_Client"
+        | extend HTTP_Request_Method = tostring(split(SignatureMatchedContent, " /", 0)[0])
+        | where HTTP_Request_Method == "GET"
+        | extend DownloadedContent = extract(@'.*/(.*)HTTP', 1, SignatureMatchedContent)
+        | extend DownloadContentFileExtention = extract(@'.*\.(.*)$', 1, DownloadedContent)
+        | where isnotempty(DownloadContentFileExtention) and string_size(DownloadContentFileExtention) < {DownloadContentFileExtention_count}
+        | where DownloadContentFileExtention has_any (ExecutableFileExtentions)
+        | project-reorder Timestamp, DeviceName, DownloadedContent, HTTP_Request_Method, RemoteIP
+    parameters:
+      DownloadContentFileExtention_count:
+        description: Limit DownloadContentFileExtention size to reduce false positives.
+        type: int
+        default: 8
+    

@@ -1,0 +1,209 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_cti", "MDE"]
+  tags: ["mstical_cti","cti"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_email:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  abuse_ch_bad_hashes_in_email_query:
+    description: Looks for abuse ch known bad hashes.
+    metadata:
+    args:
+      query: |-
+        let abuse_sha256 = (externaldata(sha256_hash: string )[@"https://bazaar.abuse.ch/export/txt/sha256/recent/"] with (format="txt"))
+        | where sha256_hash !startswith "#"
+        | project sha256_hash;
+        abuse_sha256
+        | join ({table_email} 
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        ) on $left.sha256_hash == $right.SHA256
+        | project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType, SHA256, ThreatTypes, DetectionMethods
+  urlhaus_domain_hit:
+    description: Looks for urlhaus known bad domains.
+    metadata:
+    args:
+      query: |-
+        let urlhaus = externaldata (Everything:string) [@"https://urlhaus.abuse.ch/downloads/csv_recent/"] with (format="txt",ignoreFirstRecord=true)
+        | where Everything !startswith "#"
+        | project Everything=parse_csv(Everything)
+        | project url=tostring(Everything[2]);
+        {table_network}
+        | join kind=inner urlhaus on $left.RemoteUrl == $right.url
+  threat_fox_domain_hit:
+    description: Looks for urlhaus known bad domains.
+    metadata:
+    args:
+      query: |-
+        let ThreatIntelFeed = externaldata(LineInfo: string)[@"https://threatfox.abuse.ch/downloads/hostfile/"] with (format="txt", ignoreFirstRecord=True);
+        let IPRegex = '{regex_for_ip_detection}';
+        let MalwareDomains = materialize (
+             ThreatIntelFeed
+             | where LineInfo matches regex IPRegex
+             | extend domain = extract(@'127.0.0.1(.*)\b', 1 , LineInfo)
+             | distinct domain
+             | take 10000 // Max Size allowed
+             );
+        {table_network}
+        | where RemoteUrl has_any (MalwareDomains)
+        | project Timestamp, RemoteUrl, RemoteIP, DeviceName, InitiatingProcessCommandLine, InitiatingProcessFileName, InitiatingProcessAccountDomain, InitiatingProcessAccountName
+    parameters:
+      regex_for_ip_detection:
+        description: regex for ip address detection
+        type: str
+        default: '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}'
+  feodotracker_botnet_ip_hit:
+    description: Looks for urlhaus known bad domains.
+    metadata:
+    args:
+      query: |-
+        let BotnetIP = externaldata(IP: string)[@"https://feodotracker.abuse.ch/downloads/ipblocklist.txt"] with (format="txt", ignoreFirstRecord=True);
+        let IPRegex = '{regex_for_ip_detection}';
+        let MaliciousIP = materialize (
+             BotnetIP
+             | where IP matches regex IPRegex
+             | distinct IP
+             );
+        {table_network}
+        | where RemoteIP in (MaliciousIP)
+        | project-reorder
+             Timestamp,
+             ActionType,
+             RemoteIP,
+             RemotePort,
+             LocalPort,
+             Protocol,
+             DeviceName,
+             InitiatingProcessCommandLine,
+             InitiatingProcessFolderPath
+    parameters:
+      regex_for_ip_detection:
+        description: regex for ip address detection
+        type: str
+        default: '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}'
+  tweet_feed_hit:
+    description: Looks for IOCs supplied from tweet feed.
+    metadata:
+    args:
+      query: |-
+        let MaxAge = ago({age}d);
+        let TweetFeed = materialize (
+            (externaldata(report:string)
+            [@"https://raw.githubusercontent.com/0xDanielLopez/TweetFeed/master/week.csv"]
+            with (format = "txt"))
+            | extend report = parse_csv(report)
+            | extend Type = tostring(report[2])
+            | where Type in("url","domain")
+            | extend RemoteUrl = tostring(report[3])
+            | where RemoteUrl !in({domain_whitelist})
+            | extend Tag = tostring(report[4])
+            | extend Tweet = tostring(report[5])
+            | project RemoteUrl, Tag, Tweet 
+        );
+        union (
+        TweetFeed
+            | join (
+                {table_network}
+            | where Timestamp > MaxAge
+            ) on RemoteUrl
+        ) | project Timestamp, DeviceName, RemoteUrl, Tag, Tweet
+    parameters:
+      domain_whitelist:
+        description: list of domains to exclude
+        type: list
+        default:
+          - google.com
+      age:
+        description: time to go back to.
+        type: int
+        default: 30
+  drb_ra_c2_intel_feed_hit_ip:
+    description: Looks for IPs supplied by drb-ra C2.
+    metadata:
+    args:
+      query: |-
+        let MaxAge = ago({age}d);
+        let drb_ra_c2 = materialize (
+            (externaldata(report:string)
+            [@"https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/IPC2s.csv"]
+            with (format = "txt", ignoreFirstRecord=true))
+            | extend report = parse_csv(report)
+            | extend RemoteIP = tostring(report[0])
+            | project RemoteIP
+        );
+        union (
+        drb_ra_c2
+            | join (
+                {table_network}
+            | where Timestamp > MaxAge
+            ) on RemoteIP
+        ) | project Timestamp, DeviceName, RemoteIP
+    parameters:
+      age:
+        description: time to go back to.
+        type: int
+        default: 30
+  drb_ra_c2_intel_feed_hit_domain:
+    description: Looks for Domains supplied by drb-ra C2.
+    metadata:
+    args:
+      query: |-
+        let MaxAge = ago({age}d);
+        let drb_ra_c2 = materialize (
+            (externaldata(report:string)
+            [@"https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/IPC2s.csv"]
+            with (format = "txt", ignoreFirstRecord=true))
+            | extend report = parse_csv(report)
+            | extend RemoteUrl = tostring(report[0])
+            | project RemoteUrl
+        );
+        union (
+        drb_ra_c2
+            | join (
+                {table_network}
+            | where Timestamp > MaxAge
+            ) on RemoteUrl
+        ) | project Timestamp, DeviceName, RemoteUrl
+    parameters:
+      age:
+        description: time to go back to.
+        type: int
+        default: 30
+  cert_fr_intel_feed_hit_sha1:
+    description: Looks for sha1 hashes provided by cert france.
+    metadata:
+    args:
+      query: |-
+        let CERTFRFeed = externaldata (SHA1: string, threatid :string) ["https://misp.cert.ssi.gouv.fr/feed-misp/hashes.csv"];
+        {table_file}
+        | join CERTFRFeed on SHA1
+        | extend ThreatInfoLink = strcat("https://misp.cert.ssi.gouv.fr/feed-misp/", threatid, ".json")
+        | project-reorder Timestamp, SHA1, ThreatInfoLink, DeviceName

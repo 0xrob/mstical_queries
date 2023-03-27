@@ -1,0 +1,233 @@
+metadata:
+  version: 1
+  description: MDE Queries based on C2 queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_c2", "MDE"]
+  tags: ["mstical_c2","c2"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  connection_to_tor_relay_ip:
+    description: This query looks for a connection to a tor relay.
+    metadata:
+    args:
+      query: |-
+        let TorRelayData = (
+            externaldata (Nickname:string,Fingerprint:string,EntryAddress:string,IPAddress:string,Port:string,AddressType:string,Hostname:string,CountryCode:string,IsRunning:bool,LastChangedIPData:string)
+            [h@"https://torinfo.blob.core.windows.net/public/TorRelayIPs.csv"] with (ignoreFirstRecord=true,format="csv")
+            | where AddressType == "IPv4"
+        );
+        TorRelayData
+        | join kind=inner {table_network} on $left.IPAddress == $right.RemoteIP
+        | join kind=inner (DeviceInfo | distinct DeviceId, PublicIP) on DeviceId
+        | project Timestamp, DeviceId, LocalPublicIP = PublicIP, LocalIP, RemoteIP, TorIP = IPAddress, Hostname, CountryCode, ActionType, InitiatingProcessFileName, InitiatingProcessFolderPath
+  malicious_named_pipes_query:
+    description: Identify malicious named pipes.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "NamedPipeEvent" 
+        | extend ParsedFields=parse_json(AdditionalFields)
+        | where ParsedFields.FileOperation == "File created"
+        | where ParsedFields.PipeName has_any ({bad_pipe_names})
+        | project Timestamp, ActionType, DeviceName, InitiatingProcessAccountDomain, InitiatingProcessAccountName, InitiatingProcessFolderPath, InitiatingProcessCommandLine, ParsedFields.FileOperation, ParsedFields.PipeName
+    parameters:
+      bad_pipe_names:
+        description: list of known bad pipes
+        type: list
+        default:
+          - \\46a676ab7f179e511e30dd2dc41bd388
+          - \\583da945-62af-10e8-4902-a8f205c72b2e
+          - \\9f81f59bc58452127884ce513865ed20
+          - \\ahexec
+          - \\atctl
+          - \\bizkaz
+          - \\cachedump
+          - \\comnap
+          - \\csexec                  
+          - \\csexecsvc
+          - \\e710f28d59aa529d6792ca6ff0ca1b34
+          - \\gruntsvc
+          - \\iehelper                  
+          - \\isapi_dg
+          - \\isapi_http
+          - \\jaccdpqnvbrrxlaf
+          - \\lsadump
+          - \\lsassw
+          - \\msagent_
+          - \\MSSE-
+          - \\NamePipe_MoreWindows
+          - \\paexec                     
+          - \\pcheap_reuse
+          - \\Posh
+          - \\postex_
+          - \\postex_ssh_
+          - \\psexec                         
+          - \\remcom                  
+          - \\rpchlp_3
+          - \\sdlrpc
+          - \\status_
+          - \\svcctl
+          - \\userpipe                   
+          - \\wceservicepipe
+          - \\winsession
+          - DserNamePipe
+          - mojo.5688.8052.183894939787088877
+          - mojo.5688.8052.35780273329370473
+          - mypipe-f
+          - mypipe-h
+          - ntsvcs
+          - ntsvcs_
+          - ntsvcs[
+          - scerpc
+          - scerpc_
+          - SearchTextHarvester
+          - windows.update.manager
+          - wkssvc
+  suspicious_network_beaconing:
+    description: Identify potential beaconing activity (Cyb3rm0nk).
+    metadata:
+    args:
+      query: |-
+        let starttime = datetime({start});
+        let endtime = datetime({end});
+        let TimeDeltaThresholdMin = make_timespan(0,0,0.001);  
+        let TotalEventsThresholdMin = 15;
+        let TotalEventsThresholdMax=toint(((starttime - endtime)/TimeDeltaThresholdMin));
+        let JitterThreshold = {jitter_threshold};
+        let OutlierThresholdMax = {outlier_threshold_max}; 
+        let OutlierCountMax = {outlier_count_max};
+        let CompromisedDeviceCountMax = {compromised_device_count_max};
+        let BeaconCandidates = materialize (
+            {table_network}
+            | where Timestamp >= datetime({start})
+            | where Timestamp <= datetime({end})
+            | where RemoteIPType !in ("Reserved", "Private", "LinkLocal", "Loopback")
+            | where isnotempty(RemoteIP) and RemoteIP !in ("0.0.0.0") 
+            | where not (ipv4_is_private(RemoteIP))
+            | where ActionType in ("ConnectionSuccess", "CsonnectionRequest", "CsonnectionFailed")
+            | summarize hint.strategy=shuffle make_set(Timestamp) by DeviceId, DeviceName,InitiatingProcessAccountName, InitiatingProcessAccountDomain, InitiatingProcessFileName, RemoteIP, RemotePort
+            | where array_length(set_Timestamp) > TotalEventsThresholdMin and array_length(set_Timestamp) < TotalEventsThresholdMax
+            | project DeviceId, DeviceName,InitiatingProcessAccountName, InitiatingProcessAccountDomain, InitiatingProcessFileName, RemoteIP, RemotePort, Timestamp=array_sort_asc(set_Timestamp)
+            | mv-apply Timestamp to typeof(datetime) on 
+            (     
+                extend nextTimestamp = next(Timestamp, 1), nextInitiatingProcessAccountName = next(InitiatingProcessAccountName, 1), nextDeviceId = next(DeviceId, 1), nextDeviceName = next(DeviceName, 1), nextRemoteIP = next(RemoteIP, 1), nextRemotePort = next(RemotePort, 1), nextInitiatingProcessFileName = next(InitiatingProcessFileName, 1)
+                | extend TimeDeltaInSeconds = datetime_diff('second',nextTimestamp,Timestamp)
+                | where nextInitiatingProcessAccountName == InitiatingProcessAccountName and nextDeviceId == DeviceId and nextDeviceName == DeviceName and nextInitiatingProcessFileName == InitiatingProcessFileName and nextRemoteIP == RemoteIP and nextRemotePort == RemotePort
+                | project Timestamp, TimeDeltaInSeconds, DeviceId, DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName, RemoteIP, RemotePort
+                | summarize count(), min(Timestamp), max(Timestamp), Duration=datetime_diff("second", max(Timestamp), min(Timestamp)), 
+                    percentiles(TimeDeltaInSeconds, 5, 25, 50, 75, 95), 
+                    TimeDeltaList=make_list(TimeDeltaInSeconds) by DeviceId, DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName, RemoteIP, RemotePort
+                | extend (TimeDeltaInSeconds_min,TimeDeltaInSeconds_min_index,TimeDeltaInSeconds_max,TimeDeltaInSeconds_max_index,TimeDeltaInSeconds_avg,TimeDeltaInSeconds_stdev,TimeDeltaInSeconds_variance)=series_stats(TimeDeltaList)
+                | extend Jitter=(TimeDeltaInSeconds_stdev/TimeDeltaInSeconds_avg)*100,
+                         BeaconSleepMin=TimeDeltaInSeconds_avg - TimeDeltaInSeconds_stdev,
+                         BeaconSleepMax=TimeDeltaInSeconds_avg + TimeDeltaInSeconds_stdev
+                | where Jitter < JitterThreshold
+            )
+            | join kind=leftouter
+                (
+                {table_network}
+                | where Timestamp > datetime({start})+1d
+                | extend Host=tostring(parse_url(iif(RemoteUrl !startswith "http", strcat(@'http://',RemoteUrl),RemoteUrl)).Host)
+                | extend domain = reverse(replace(@'([A-z0-9-]+\.[A-z0-9-]+\.[A-z0-9-]+)\..*',@'\1',reverse(Host)))
+                | project domain, RemoteIP
+                | summarize Domains = make_set(domain) by RemoteIP
+                ) on RemoteIP
+                | project-reorder DeviceId, DeviceName, InitiatingProcessAccountName, InitiatingProcessAccountDomain
+        )
+        ;
+        let PotentialBeacons = materialize (
+            BeaconCandidates
+            | summarize dcount(DeviceId) by InitiatingProcessFileName, RemoteIP, RemotePort
+            | where dcount_DeviceId <= CompromisedDeviceCountMax
+            | join kind=inner BeaconCandidates on InitiatingProcessFileName, RemoteIP, RemotePort
+            | project-away *1
+            )
+            ;
+        let ImpossibleBeaconsByTimeDelta = materialize 
+            (
+            PotentialBeacons
+            | extend outliers = series_outliers(TimeDeltaList)
+            | mv-expand TimeDeltaList, outliers to typeof(double)
+            | where outliers > OutlierThresholdMax or outliers < (-1 * OutlierCountMax)
+            | summarize count(), make_set(outliers) by DeviceId, DeviceName,InitiatingProcessAccountName, InitiatingProcessAccountDomain, InitiatingProcessFileName, RemoteIP, RemotePort
+            | where count_ > OutlierCountMax
+            )
+            ;
+        PotentialBeacons
+        | join kind=leftantisemi ImpossibleBeaconsByTimeDelta on DeviceId, DeviceName,InitiatingProcessAccountName, InitiatingProcessAccountDomain, InitiatingProcessFileName, RemoteIP, RemotePort
+        | extend Timestamp = min_Timestamp
+        | order by Jitter asc, TimeDeltaInSeconds_avg asc
+    parameters:
+      jitter_threshold:
+        description: jitter in percentage tighter filtering/fewer results.
+        type: int
+        default: 50
+      outlier_threshold_max:
+        description: Outlier thresholds. 1.5 means the value is a normal outlier, 3 means the value is far far out.
+        type: int
+        default: 50
+      outlier_count_max:
+        description: Time delta data set can have some outliers. Define how many outliers are acceptable for a beacon. Values between 1 to 3 should be fine.
+        type: int
+        default: 3
+      compromised_device_count_max:
+        description: increasing the value provides more results.
+        type: int
+        default: 10
+  suspicious_tld:
+    description: Identify outbound connections to a top-10 suspicious TLD.
+    metadata:
+    args:
+      query: |-
+        {table_network}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where RemoteUrl has_any({suspicious_tld})
+        | where not(RemoteUrl has_any({whitelisted_domain}))
+        | summarize count() by RemoteUrl, InitiatingProcessFileName
+        | where count_ < 5
+    parameters:
+      suspicious_tld:
+        description: List of suspicious TLDs.
+        type: list
+        default: 
+          - .ru
+          - .cn
+          - .tk
+          - .ml
+          - .xyz
+          - .buzz
+          - .shop
+          - .cf
+          - .ga
+      whitelisted_domain:
+        description: List of whitelisted domains.
+        type: list
+        default: 
+          - google.ru

@@ -1,0 +1,201 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT Persistence queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_persistence", "MDE"]
+  tags: ["mstical_persistence","persistence"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+   accessibility_features_abuse:
+    description: this query looks for potential Accessibility Feature abuse.
+    metadata:
+    args:
+      query: |-
+        let accessibilityProcessNames = dynamic(["utilman.exe","osk.exe","magnify.exe","narrator.exe","displayswitch.exe","atbroker.exe","sethc.exe", "helppane.exe"]);
+        let attachedDebugger =
+            {table_registry}
+            | where Timestamp >= datetime({start})
+            | where Timestamp <= datetime({end})  
+            and RegistryKey startswith @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\"
+            and RegistryValueName =~ "debugger"
+            | parse RegistryKey with @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\" FileName
+            | where FileName in~ (accessibilityProcessNames) and isnotempty(RegistryValueData)
+            | project Technique="AttachedDebugger", FileName, AttachedDebuggerCommandline=RegistryValueData, InitiatingProcessCommandLine, Timestamp, DeviceName;
+        let fileOverwiteOfAccessibilityFiles =
+            {table_file}
+              | where Timestamp >= datetime({start})
+              | where Timestamp <= datetime({end})  
+                and FileName in~ (accessibilityProcessNames)
+                and FolderPath contains @"Windows\System32" 
+            | project Technique="OverwriteFile", Timestamp, DeviceName, FileName, SHA1, InitiatingProcessCommandLine;
+        let executedProcessIsPowershellOrCmd =
+            {table_process} 
+            | project Technique="PreviousOverwriteFile", Timestamp, DeviceName, FileName, SHA1 
+              | where Timestamp >= datetime({start})
+              | where Timestamp <= datetime({end})  
+            | where FileName in~ (accessibilityProcessNames)
+            | join kind=leftsemi(
+                {table_process}  
+                | where Timestamp > ago(14d) and (FileName =~ "cmd.exe" or FileName =~ "powershell.exe")
+                | summarize MachinesCount = dcount(DeviceName) by SHA1  
+                | where MachinesCount > 5
+                | project SHA1
+            ) on SHA1;
+        attachedDebugger
+        | union kind=outer fileOverwiteOfAccessibilityFiles
+        | union kind=outer executedProcessIsPowershellOrCmd
+   local_admin_group_changes:
+    description: This query looks for local admin group changes.
+    metadata:
+    args:
+      query: |-
+        let ADAZUsers =  IdentityInfo 
+        | extend DirectoryDomain = AccountDomain 
+        | extend DirectoryAccount = AccountName 
+        | distinct DirectoryDomain , DirectoryAccount , OnPremSid , CloudSid, AccountUpn, GivenName, Surname;
+        let NewUsers =  {table_device}
+        | where ActionType contains "UserAccountCreated"  or ActionType contains "UserAccountModified"
+        | extend lUserAdded = AccountName
+        | extend NewUserSID = AccountSid
+        | extend laccountdomain = AccountDomain
+        | distinct NewUserSID, lUserAdded,laccountdomain;
+        {table_device} 
+        | where ActionType == 'UserAccountAddedToLocalGroup' 
+        | extend AddedAccountSID = tostring(parse_json(AdditionalFields).MemberSid)
+        | extend LocalGroup = AccountName
+        | extend LocalGroupSID = AccountSid
+        | extend Actor = trim(@"[^\w]+",InitiatingProcessAccountName)
+        | where LocalGroupSID contains "S-1-5-32-544"
+        | join kind= leftouter    (NewUsers)
+        on $left.AddedAccountSID == $right.NewUserSID
+        | project Timestamp, DeviceName, LocalGroup,LocalGroupSID, AddedAccountSID, lUserAdded , Actor, ActionType , laccountdomain 
+        | join kind= leftouter        (ADAZUsers)
+        on $left.AddedAccountSID == $right.OnPremSid
+        | extend UserAdded = iff(isnotempty(lUserAdded),strcat(laccountdomain,"\\", lUserAdded), strcat(DirectoryDomain,"\\", DirectoryAccount))
+        | project Timestamp, DeviceName, LocalGroup,LocalGroupSID, AddedAccountSID, UserAdded , Actor, ActionType  
+        | where DeviceName !contains Actor 
+        | summarize count()  by Actor 
+        | join ADAZUsers
+        on $left.Actor == $right.DirectoryAccount 
+   scheduled_task_creation_by_non_admin:
+    description: This query looks for scheduled tasks created by non admins.
+    metadata:
+    args:
+      query: |-
+        {table_device} 
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})  
+        | where ActionType == "ScheduledTaskCreated"  and InitiatingProcessAccountSid != "S-1-5-18"
+   asep_for_persistence_with_suspicious_execution:
+    description: This query looks for run keys with suspicious execution parameters.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})  
+        | where ActionType == "RegistryValueSet"
+        | where RegistryValueData has_any(@"AppData","rundll32","regsvr32","wscript","cscript") 
+        | where RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnce"
+            or RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnceEx"
+            or RegistryKey has @"Microsoft\Windows\CurrentVersion\Run"
+            or RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            or (RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+            or (RegistryKey has @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" and RegistryValueName == "Run")
+            or (RegistryKey has @"\Session Manager" and RegistryValueName == "BootExecute")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Userinit")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Shell")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Windows" and RegistryValueName == "load")
+            or RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon\Notify" 
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServices"
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
+        | project RegistryKey, RegistryValueData, DeviceId, Timestamp
+   asep_keys_for_persistence_with_suspicious_creation_or_rare_parameters:
+    description: This query looks for run keys with suspicious creation or rare.
+    metadata:
+    args:
+      query: |-
+        let dataset= materialize (
+        {table_registry} 
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})  
+        | where ActionType == "RegistryValueSet" 
+        | where RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnce"
+            or RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnceEx"
+            or RegistryKey has @"Microsoft\Windows\CurrentVersion\Run"
+            or RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            or (RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+            or (RegistryKey has @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" and RegistryValueName == "Run")
+            or (RegistryKey has @"\Session Manager" and RegistryValueName == "BootExecute")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Userinit")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Shell")
+            or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Windows" and RegistryValueName == "load")
+            or RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon\Notify" 
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServices"
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"
+            or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
+            or (RegistryKey has @"SOFTWARE\Classes\CLSID" and RegistryKey endswith "InprocServer32" and isempty(RegistryValueName))
+        | where RegistryValueData !endswith @".rbf /restore"
+        | extend NormalizedRegistryValueData = replace(@'(C|D):\\Users\\.*?\\', @'C:\\Users\\userxx\\',RegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'regex_string_1', @'regex_string_2',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'\\[A-Za-z0-9-]+-[A-Za-z0-9]+\\', @'\\xxxxxxxxxx\\',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'\d+\.\d+\.\d+\.\d+', @'X.Y.Z.T',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'-\d+\.\d+\.\d+', @'-X.Y.Z',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'_\d+\.log', @'_XYZT.log',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'--quiet|--passive', @'',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'installSessionId\s[A-Za-z0-9-]+', @'installSessionId xxxxxx',NormalizedRegistryValueData )
+        | extend NormalizedRegistryValueData = replace(@'C:\\ProgramData\\.*?\\Microsoft\\Teams\\',@'C:\\ProgramData\\userxxx\\Microsoft\\Teams\\',NormalizedRegistryValueData)
+        );
+        dataset
+        | summarize dcount_device = dcount(DeviceId), total_count = count() by NormalizedRegistryValueData
+        | where dcount_device <=5 and total_count <20
+        | join kind=inner (dataset| where Timestamp > ago(1d)) on NormalizedRegistryValueData
+        | invoke FileProfile(InitiatingProcessSHA1,1000)
+        | where GlobalPrevalence <100
+                 or isempty(GlobalPrevalence)
+                 or InitiatingProcessFileName in~ ("powershell.exe","reg.exe", "regedit.exe", "cmd.exe","winword.exe","excel.exe","powerpnt.exe","rundll32.exe","regsvr32.exe")
+    parameters:
+      regex_string_1:
+        description: list of known bad pipes
+        type: str
+        default: \{.*\}
+      regex_string_2:
+        description: list of known bad pipes
+        type: str
+        default: \{xxxxxxxxxx\}

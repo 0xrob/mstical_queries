@@ -1,0 +1,58 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_lateral_movement", "MDE"]
+  tags: ["mstical_lateral_movement","lateral_movement"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_email:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  local_admin_remote_interactive_logon:
+    description: This query looks for a remote interactive logon from a local admin account.
+    metadata:
+    args:
+      query: |-
+        DeviceLogonEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where IsLocalAdmin == "True"
+        | where LogonType == "RemoteInteractive"
+        | extend IsLocalLogon = tostring(todynamic(AdditionalFields).IsLocalLogon)
+        | summarize DevicesAccessed = make_set(DeviceName) by AccountName, AccountDomain
+        | extend TotalDevices = array_length(DevicesAccessed)
+        | sort by TotalDevices
+  psexec_usage_via_service_creation:
+    description: This query looks for psexec service creation.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})  
+        | where ActionType == "ServiceInstalled"

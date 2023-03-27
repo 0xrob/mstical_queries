@@ -1,0 +1,459 @@
+metadata:
+  version: 1
+  description: MDE Queries around suspicious processes creation events
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_host_triage", "MDE"]
+  tags: ["mstical_host_triage","process","host_triage"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  host_processes_query:
+    description: process creation events list of endpoints
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has_any({hostname})
+        | where FileName has_any({processes})
+    parameters:
+      processes:
+        description: Process name
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_parent_processes_query:
+    description: parent process creation events list of endpoints
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has_any({hostname})
+        | where InitiatingProcessFileName has_any({parent_processes})
+    parameters:
+      parent_processes:
+        description: Parent Process name
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_grand_parent_processes_query:
+    description: grand process creation events list of endpoints
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has_any({hostname})
+        | where InitiatingProcessParentFileName has_any({grand_parent_processes})
+    parameters:
+      grand_parent_processes:
+        description: grand parent Process name
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_all_process_execution:
+    description: Lists all process execution for a host
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        {add_query_items}
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_parent_processes_and_child_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where InitiatingProcessFileName has_any({parent_processes})
+        | where FileName has_any({processes})
+        {add_query_items}
+    parameters:
+      parent_processes:
+        description: Parent Process name
+        type: list
+      processes:
+        description: Process name
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_process_cmd_lines:
+    description: Lists all processes with a list of commandlines
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where ProcessCommandLine has_any({cmd_lines})
+        {add_query_items}
+    parameters:
+      cmd_lines:
+        description: Command line artifact to search for
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_image_load_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where FileName has_any({loaded_image})
+    parameters:
+      loaded_image:
+        description: image that was loaded
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_registry_key_set_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where ActionType == "RegistryValueSet"
+        | where RegistryKey has_any({registry_key})
+    parameters:
+      registry_key:
+        description: image that was loaded
+        type: list
+      hostname:
+        description: hostname name
+        type: list
+  host_asep_registry_key_set_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where ActionType == "RegistryValueSet"
+        | where RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnce"
+          or RegistryKey has @"Microsoft\Windows\CurrentVersion\RunOnceEx"
+          or RegistryKey has @"Microsoft\Windows\CurrentVersion\Run"
+          or RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+          or (RegistryKey has @"\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+          or (RegistryKey has @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" and RegistryValueName == "Run")
+          or (RegistryKey has @"\Session Manager" and RegistryValueName == "BootExecute")
+          or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Userinit")
+          or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon" and RegistryValueName == "Shell")
+          or (RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Windows" and RegistryValueName == "load")
+          or RegistryKey has @"Microsoft\Windows NT\CurrentVersion\Winlogon\Notify" 
+          or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServices"
+          or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"
+          or RegistryKey has @"\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_scheduled_task_creation_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where ActionType == "ScheduledTaskCreated"
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_get_services_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}  
+        | where ActionType == "ServiceInstalled"
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_process_injection_api_calls_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}  
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_process_execution_from_path_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}  
+        | where FolderPath has_any({file_path})
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+      file_path:
+        description: file path of executable
+        type: list
+  host_malicious_named_pipes_query:
+    description: gimmme process events
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname} 
+        | where ActionType == "NamedPipeEvent" 
+        | extend ParsedFields=parse_json(AdditionalFields)
+        | where ParsedFields.FileOperation == "File created"
+        | where ParsedFields.PipeName has_any ({bad_pipe_names})
+        | project Timestamp, ActionType, DeviceName, InitiatingProcessAccountDomain, InitiatingProcessAccountName, InitiatingProcessFolderPath, InitiatingProcessCommandLine, ParsedFields.FileOperation, ParsedFields.PipeName
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+      bad_pipe_names:
+        description: list of known bad pipes
+        type: list
+        default:
+          - \\46a676ab7f179e511e30dd2dc41bd388
+          - \\583da945-62af-10e8-4902-a8f205c72b2e
+          - \\9f81f59bc58452127884ce513865ed20
+          - \\ahexec
+          - \\atctl
+          - \\bizkaz
+          - \\cachedump
+          - \\comnap
+          - \\csexec                  
+          - \\csexecsvc
+          - \\e710f28d59aa529d6792ca6ff0ca1b34
+          - \\gruntsvc
+          - \\iehelper                  
+          - \\isapi_dg
+          - \\isapi_http
+          - \\jaccdpqnvbrrxlaf
+          - \\lsadump
+          - \\lsassw
+          - \\msagent_
+          - \\MSSE-
+          - \\NamePipe_MoreWindows
+          - \\paexec                     
+          - \\pcheap_reuse
+          - \\Posh
+          - \\postex_
+          - \\postex_ssh_
+          - \\psexec                         
+          - \\remcom                  
+          - \\rpchlp_3
+          - \\sdlrpc
+          - \\status_
+          - \\svcctl
+          - \\userpipe                   
+          - \\wceservicepipe
+          - \\winsession
+          - DserNamePipe
+          - mojo.5688.8052.183894939787088877
+          - mojo.5688.8052.35780273329370473
+          - mypipe-f
+          - mypipe-h
+          - ntsvcs
+          - ntsvcs_
+          - ntsvcs[
+          - scerpc
+          - scerpc_
+          - SearchTextHarvester
+          - windows.update.manager
+          - wkssvc
+  host_code_injection_into_lsass:
+    description: Code injection into LSASS.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}  
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+        | where FileName has_any("lsass")
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_detect_img_or_iso_being_mounted:
+    description: Look for links opened from outlook.exe, followed by a browser download and then a SmartScreen app warning that was ignored by the user.
+    metadata:
+    args:
+      query: |-
+        {table_file}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where DeviceName has {hostname}  
+        | where FileName endswith ".iso.lnk" or FileName endswith ".img.lnk"
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_process_creation_mounted_image:
+    description: Look for links opened from outlook.exe, followed by a browser download and then a SmartScreen app warning that was ignored by the user.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where DeviceName has {hostname}  
+        | where ActionType == "RegistryValueSet" and RegistryKey == @"HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices" and RegistryValueName startswith @"\DosDevices\"
+        | extend Folder = toupper(replace(@'\\DosDevices\\(\w:)',@'\1',RegistryValueName))
+        | join kind=inner 
+            (
+            {table_process}
+            | where Timestamp > ago(lookback)
+            | extend Folder = toupper(replace(@'(\w:)\\.*',@'\1',FolderPath))
+            ) on DeviceId, Folder
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_process_creation_mounted_image_with_network_communications:
+    description: Look for links opened from outlook.exe, followed by a browser download and then a SmartScreen app warning that was ignored by the user.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where DeviceName has {hostname}
+        | where ActionType == "RegistryValueSet" and RegistryKey == @"HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices" and RegistryValueName startswith @"\DosDevices\"
+        | extend Folder = toupper(replace(@'\\DosDevices\\(\w:)',@'\1',RegistryValueName)) // Extract the folder name
+        | join kind=inner 
+            (
+            {table_network}
+            | where Timestamp > ago(lookback)
+            | extend Folder = toupper(replace(@'(\w:)\\.*',@'\1',InitiatingProcessFolderPath))
+            ) on DeviceId, Folder
+    parameters:
+      hostname:
+        description: hostname name
+        type: list
+  host_uac_bypass-via-elevated-com-abuse:
+    description: This query will aim to detect uac bypasses commonly used in uacme.
+    uri: https://github.com/hfiref0x/UACME/blob/2505976320fe33cbc533e2a0061f23c53989e91f/Source/Shared/consts.h
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where DeviceName has {hostname}
+        | where (FileName has "dllhost.exe" and ProcessCommandLine has_any (
+          "D2E7041B-2927-42fb-8E9F-7CE93B6DC937",
+          "3E5FC7F9-9A51-4367-9063-A120244FBEC7",
+          "752438CB-E941-433F-BCB4-8B7D2329F0C8",
+          "3AD05575-8857-4850-9277-11B85BDB8E09",
+          "4D111E08-CBF7-4f12-A926-2C7920AF52FC",
+          "17CCA47D-DAE5-4E4A-AC42-CC54E28F334A",
+          "BDB57FF2-79B9-4205-9447-F5FE85F37312",
+          "E9495B87-D950-4AB5-87A5-FF6D70BF3E90",
+          "E10F6C3A-F1AE-4ADC-AA9D-2FE65525666E",
+          "ddc05a5a-351a-4e06-8eaf-54ec1bc2dcea",
+          "1f486a52-3cb1-48fd-8f50-b8dc300d9f9d",
+          "4590f811-1d3a-11d0-891f-00aa004b2e24",
+          "4de225bf-cf59-4cfc-85f7-68b90f185355",
+          "F56F6FDD-AA9D-4618-A949-C1B91AF43B1A"
+        )) or (InitiatingProcessFolderPath has "dllhost.exe" and InitiatingProcessCommandLine has_any (
+          "D2E7041B-2927-42fb-8E9F-7CE93B6DC937",
+          "3E5FC7F9-9A51-4367-9063-A120244FBEC7",
+          "752438CB-E941-433F-BCB4-8B7D2329F0C8",
+          "3AD05575-8857-4850-9277-11B85BDB8E09",
+          "4D111E08-CBF7-4f12-A926-2C7920AF52FC",
+          "17CCA47D-DAE5-4E4A-AC42-CC54E28F334A",
+          "BDB57FF2-79B9-4205-9447-F5FE85F37312",
+          "E9495B87-D950-4AB5-87A5-FF6D70BF3E90", 
+          "E10F6C3A-F1AE-4ADC-AA9D-2FE65525666E",
+          "ddc05a5a-351a-4e06-8eaf-54ec1bc2dcea",
+          "1f486a52-3cb1-48fd-8f50-b8dc300d9f9d",
+          "4590f811-1d3a-11d0-891f-00aa004b2e24",
+          "4de225bf-cf59-4cfc-85f7-68b90f185355",
+          "F56F6FDD-AA9D-4618-A949-C1B91AF43B1A") and not(FileName has "werfault.exe"))
+    parameters:
+      hostname:
+        description: hostname name
+        type: list

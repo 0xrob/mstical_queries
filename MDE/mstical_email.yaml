@@ -1,0 +1,75 @@
+metadata:
+  version: 1
+  description: MDE Queries based on Privilege escalation queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_email", "MDE"]
+  tags: ["mstical_email","email"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_email:
+      description: Table Name
+      type: string
+      default: EmailEvents
+    table_email_attachments:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  emails_forwarded_to_mailbox:
+    description: This query will look for all emails sent to a mailbox and then correlate on message id to get original attachments.
+    metadata:
+    args:
+      query: |-
+        let spam_attachments = 
+        {table_email}
+        | where RecipientEmailAddress == "{mailbox}"
+        | project NetworkMessageId, Subject, SenderFromAddress;
+        let email_receiver = 
+        {table_email_attachments}
+        | project NetworkMessageId, FileName, FileType, SHA256;
+        email_receiver
+        | join kind=inner spam_attachments on NetworkMessageId
+        | project SenderFromAddress, Subject, FileName, FileType, SHA256
+    parameters:
+      mailbox:
+        description: email address users forward spam to.
+        type: str
+        default: fakeemail@example.com
+  all_emails_from_specific_sender:
+    description: This query will look for all emails sent from a mailbox.
+    metadata:
+    args:
+      query: |-
+        {table_email}
+        | where SenderFromAddress == "{mailbox}"
+    parameters:
+      mailbox:
+        description: email address users forward spam to.
+        type: str
+        default: fakeemail@example.com
+  all_emails_to_specific_recipient:
+    description: This query will look for all emails sent from a mailbox.
+    metadata:
+    args:
+      query: |-
+        {table_email}
+        | where RecipientEmailAddress == "{mailbox}"
+    parameters:
+      mailbox:
+        description: email address users forward spam to.
+        type: str
+        default: fakeemail@example.com

@@ -1,0 +1,82 @@
+metadata:
+  version: 1
+  description: MDE Queries based on Privilege escalation queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_privilege_escalation", "MDE"]
+  tags: ["mstical_privilege_escalation","privilege_escalation"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  uac_bypass-via-elevated-com-abuse:
+    description: This query will aim to detect uac bypasses commonly used in uacme.
+    uri: https://github.com/hfiref0x/UACME/blob/2505976320fe33cbc533e2a0061f23c53989e91f/Source/Shared/consts.h
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where (FileName has "dllhost.exe" and ProcessCommandLine has_any (
+          "D2E7041B-2927-42fb-8E9F-7CE93B6DC937",
+          "3E5FC7F9-9A51-4367-9063-A120244FBEC7",
+          "752438CB-E941-433F-BCB4-8B7D2329F0C8",
+          "3AD05575-8857-4850-9277-11B85BDB8E09",
+          "4D111E08-CBF7-4f12-A926-2C7920AF52FC",
+          "17CCA47D-DAE5-4E4A-AC42-CC54E28F334A",
+          "BDB57FF2-79B9-4205-9447-F5FE85F37312",
+          "E9495B87-D950-4AB5-87A5-FF6D70BF3E90",
+          "E10F6C3A-F1AE-4ADC-AA9D-2FE65525666E",
+          "ddc05a5a-351a-4e06-8eaf-54ec1bc2dcea",
+          "1f486a52-3cb1-48fd-8f50-b8dc300d9f9d",
+          "4590f811-1d3a-11d0-891f-00aa004b2e24",
+          "4de225bf-cf59-4cfc-85f7-68b90f185355",
+          "F56F6FDD-AA9D-4618-A949-C1B91AF43B1A"
+        )) or (InitiatingProcessFolderPath has "dllhost.exe" and InitiatingProcessCommandLine has_any (
+          "D2E7041B-2927-42fb-8E9F-7CE93B6DC937",
+          "3E5FC7F9-9A51-4367-9063-A120244FBEC7",
+          "752438CB-E941-433F-BCB4-8B7D2329F0C8",
+          "3AD05575-8857-4850-9277-11B85BDB8E09",
+          "4D111E08-CBF7-4f12-A926-2C7920AF52FC",
+          "17CCA47D-DAE5-4E4A-AC42-CC54E28F334A",
+          "BDB57FF2-79B9-4205-9447-F5FE85F37312",
+          "E9495B87-D950-4AB5-87A5-FF6D70BF3E90", 
+          "E10F6C3A-F1AE-4ADC-AA9D-2FE65525666E",
+          "ddc05a5a-351a-4e06-8eaf-54ec1bc2dcea",
+          "1f486a52-3cb1-48fd-8f50-b8dc300d9f9d",
+          "4590f811-1d3a-11d0-891f-00aa004b2e24",
+          "4de225bf-cf59-4cfc-85f7-68b90f185355",
+          "F56F6FDD-AA9D-4618-A949-C1B91AF43B1A") and not(FileName has "werfault.exe"))

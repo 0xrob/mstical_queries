@@ -1,0 +1,767 @@
+metadata:
+  version: 1
+  description: MDE Queries based on OSINT CTI queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_execution", "MDE"]
+  tags: ["mstical_execution","execution"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    table_email_attachments:
+      description: Table Name
+      type: string
+      default: EmailAttachmentInfo
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    table_file:
+      description: Table Name
+      type: string
+      default: DeviceFileEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  base64_detector_and_decoder:
+    description: This query will identify strings in command lines which match Base64 encoding format, extract the string to a column called Base64, and decode it in a column called DecodedString.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | extend SplitLaunchString = split(ProcessCommandLine, " ")
+        | mvexpand SplitLaunchString
+        | where SplitLaunchString matches regex "{base64_detection}"
+        | extend Base64 = tostring(SplitLaunchString)
+        | extend DecodedString = base64_decodestring(Base64)
+        | where isnotempty(DecodedString)
+    parameters:
+      base64_detection:
+        description: regex for base64 detection
+        type: str
+        default: "^[A-Za-z0-9+/]{50,}[=]{0,2}$"
+  base64_recon_commands:
+    description: This query will identify strings in command lines which match Base64 encoding format, extract the string to a column called Base64, and decode it in a column called DecodedString.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine contains "powershell" or InitiatingProcessCommandLine contains "powershell"
+        | where ProcessCommandLine has_any ({EncodedList}) or InitiatingProcessCommandLine has_any ({EncodedList})
+        | extend base64String = extract(@"{base64_detection}", 1, ProcessCommandLine)
+        | extend DecodedCommandLine = base64_decode_tostring(base64String)
+        | extend DecodedCommandLineReplaceEmptyPlaces = replace_string(DecodedCommandLine, "\u0000", "")
+        | where isnotempty(base64String) and isnotempty(DecodedCommandLineReplaceEmptyPlaces)
+        | where DecodedCommandLineReplaceEmptyPlaces has_any ({ReconVariables})
+        | project
+             Timestamp,
+             ActionType,
+             DecodedCommandLineReplaceEmptyPlaces,
+             ProcessCommandLine,
+             InitiatingProcessCommandLine,
+             DeviceName,
+             AccountName,
+             AccountDomain
+    parameters:
+      base64_detection:
+        description: regex for base64 detection
+        type: str
+        default: \s+([A-Za-z0-9+/]{20}\S+$)
+      ReconVariables:
+        description: recon strings in base64
+        type: list
+        default:
+          - Get-ADGroupMember
+          - Get-ADComputer
+          - Get-ADUser
+          - Get-NetGPOGroup
+          - net user
+          - whoami
+          - net group
+          - hostname
+          - netsh firewall
+          - tasklist
+          - arp
+          - systeminfo
+          - wmic
+      EncodedList:
+        description: parameters for encoded command
+        type: list
+        default:
+          - -encodedcommand
+          - -enc
+  base64_pe_file:
+    description: This query will identify strings in command lines which match a Base64 encoded PE file.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where ProcessCommandLine contains "TVqQAAMAAAAEAAA"
+  bitsadmin_download_upload_activity:
+    description: This query will identify bitsadmin being used suspiciously
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where 
+            (FileName =~ "bitsadmin.exe" or column_ifexists("ProcessVersionInfoOriginalFileName","ColumnNotAvailable") =~ "bitsadmin.exe")
+            and ProcessCommandLine has_any ("/Transfer","/AddFile", "/AddFileSet","/AddFileWithRanges")
+        | extend 
+            ParsedCommandLine = parse_command_line(ProcessCommandLine,"windows")
+        | extend     
+            RemoteUrl = tostring(ParsedCommandLine[-2]),
+            LocalFile= tostring(ParsedCommandLine[-1]),
+            Direction = iff(ProcessCommandLine has "/Upload", "Upload", "Download")
+        | project-reorder 
+            Timestamp,
+            DeviceId,
+            DeviceName,
+            Direction,
+            RemoteUrl,
+            LocalFile,
+            InitiatingProcessFolderPath,
+            InitiatingProcessAccountDomain,
+            InitiatingProcessAccountName,
+            InitiatingProcessSHA256,
+            ProcessCommandLine
+  file_copy_and_execution_over_smb:
+    description: This query will identify a file being copied and executed within a specified time limit.
+    metadata:
+    args:
+      query: |-
+        let ToleranceInSeconds = {threshold};
+        {table_network}
+        | where LocalPort == 445 and isnotempty(RemoteIP)
+        | join kind = inner DeviceLogonEvents on DeviceId
+        | where Timestamp1 between (Timestamp .. datetime_add("second",ToleranceInSeconds,Timestamp)) and RemoteIP endswith RemoteIP1
+        | join kind=inner (
+            {table_file}
+            | where ActionType in ("FileModified","FileCreated") and (InitiatingProcessFileName =~ "System" or InitiatingProcessFolderPath endswith "ntoskrnl.exe")
+        ) on DeviceId
+        | where Timestamp2 between (Timestamp .. datetime_add("second",ToleranceInSeconds,Timestamp))
+        | join kind=inner DeviceProcessEvents on DeviceId, FolderPath
+        | where Timestamp3 between (Timestamp .. datetime_add("second",ToleranceInSeconds,Timestamp))
+        | project Timestamp, DeviceName, RemoteIP, RemotePort, AccountDomain, AccountName, AccountSid, Protocol, LogonId, RemoteDeviceName, IsLocalAdmin, FileName, FolderPath, SHA1, SHA256, MD5, ProcessCommandLine
+    parameters:
+      threshold:
+        description: threshold for file copy and execution
+        type: str
+        default: "5"
+  suspicious_in_recycle_execution:
+    description: this query looks for process execution from the recycle folder from common interpreters.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName in~("cmd.exe","ftp.exe","schtasks.exe","powershell.exe","rundll32.exe","regsvr32.exe","msiexec.exe","wscript.exe","cscript.exe")
+        | where ProcessCommandLine contains ":\\recycler"
+        | project Timestamp, DeviceName, ProcessCommandLine, InitiatingProcessFileName
+  powershell_downloads:
+    description: this query looks for powershell downloading a file based on the commandline
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName in~ ("powershell.exe", "powershell_ise.exe")
+        | where ProcessCommandLine has "Net.WebClient"
+           or ProcessCommandLine has "DownloadFile"
+           or ProcessCommandLine has "Invoke-WebRequest"
+           or ProcessCommandLine has "Invoke-Shellcode"
+           or ProcessCommandLine has "http"
+           or ProcessCommandLine has "IEX"
+           or ProcessCommandLine has "Start-BitsTransfer"
+           or ProcessCommandLine has "mpcmdrun.exe"
+        | project Timestamp, DeviceName, InitiatingProcessFileName, FileName, ProcessCommandLine
+  rare_cmdlets_executed_on_host:
+    description: this query looks for powershell executing a rare cmdlet
+    metadata:
+    args:
+      query: |-
+       let DeviceId = "";
+       let powershellCommands =
+           {table_device}
+           | where ActionType == "PowerShellCommand"
+           | project PowershellCommand=extractjson("$.Command", AdditionalFields, typeof(string)), InitiatingProcessCommandLine, InitiatingProcessParentFileName, Timestamp, DeviceId
+           | where PowershellCommand !endswith ".ps1" and PowershellCommand !endswith ".exe";
+       powershellCommands
+       | where DeviceId == DeviceId and Timestamp >= datetime({start}) and Timestamp <= datetime({end})
+       | join kind=leftanti (powershellCommands | summarize MachineCount=dcount(DeviceId) by PowershellCommand | where MachineCount > {machine_count}) on PowershellCommand
+    parameters:
+      machine_count:
+        description: threshold for machine count for rare cmdlets
+        type: str
+        default: "5"
+  suspicious_process_spawned_by_webserver:
+    description: this query looks for webserver processes spawning suspicious child processes.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has_any("w3wp.exe", "httpd.exe", "sqlservr.exe", "caddy.exe")
+        | where FileName in~ ("cmd.exe", "powershell.exe", "ipconfig.exe", "rundll32.exe", "regsvr32.exe",  "cscript.exe", "wscript.exe", "net.exe", "net1.exe", "ping.exe", "whoami.exe")
+        | summarize instances = count() by ProcessCommandLine, FolderPath, DeviceName, DeviceId 
+        | order by instances asc
+  anomalous_process_tree_for_office_applications:
+    description: this query looks for a anomalous process tree for office processes
+    metadata:
+    args:
+      query: |-
+        let timeframe = 48h;
+        let _selected_processes = dynamic(["winword.exe","excel.exe","powerpnt.exe","acrord32.exe", "outlook.exe","onenote.exe"]); 
+        let _process_tree_data= materialize 
+        ( {table_process}
+            | where Timestamp > ago(timeframe)
+            | where InitiatingProcessFileName in~ (_selected_processes)
+            | project DeviceId,DeviceName, 
+                      InitiatingProcessG3ParentFileName=FileName,InitiatingProcessG3ParentSHA1=SHA1,InitiatingProcessG3ParentId=ProcessId, InitiatingProcessG3ParentCommandLine=ProcessCommandLine,InitiatingProcessG3ParentCreationTime=todatetime(ProcessCreationTime),
+                      InitiatingProcessG4ParentFileName=InitiatingProcessFileName,InitiatingProcessG4ParentSHA1=InitiatingProcessSHA1,InitiatingProcessG4ParentId=InitiatingProcessId,InitiatingProcessG4ParentCommandLine=InitiatingProcessCommandLine, InitiatingProcessG4ParentCreationTime=todatetime(InitiatingProcessCreationTime)
+            | join kind=leftouter (
+                        {table_process}
+                            | where Timestamp > ago(timeframe)
+                            | project DeviceId, InitiatingProcessG2ParentFileName=FileName,InitiatingProcessG2ParentFolderPath=FolderPath,InitiatingProcessG2ParentSHA1=SHA1, InitiatingProcessG2ParentId=ProcessId,  InitiatingProcessG2ParentCommandLine=ProcessCommandLine, InitiatingProcessG2ParentCreationTime=todatetime(ProcessCreationTime), 
+                               InitiatingProcessG3ParentFileName=InitiatingProcessFileName,InitiatingProcessG3ParentFolderPath=InitiatingProcessFolderPath,InitiatingProcessG3ParentSHA1=InitiatingProcessSHA1, InitiatingProcessG3ParentId=InitiatingProcessId,  InitiatingProcessG3ParentCommandLine=InitiatingProcessCommandLine, InitiatingProcessG3ParentCreationTime=todatetime(InitiatingProcessCreationTime)
+                             ) 
+                             on DeviceId , InitiatingProcessG3ParentFileName, InitiatingProcessG3ParentId, InitiatingProcessG3ParentCreationTime
+                | join kind=leftouter (
+                            {table_process}
+                                | where Timestamp > ago(timeframe)
+                                | project DeviceId, InitiatingProcessG1ParentFileName=FileName,InitiatingProcessG1ParentFolderPath=FolderPath,InitiatingProcessG1ParentSHA1=SHA1, InitiatingProcessG1ParentId=ProcessId,  InitiatingProcessG1ParentCommandLine=ProcessCommandLine, InitiatingProcessG1ParentCreationTime=todatetime(ProcessCreationTime), 
+                                InitiatingProcessG2ParentFileName=InitiatingProcessFileName,InitiatingProcessG2ParentFolderPath=InitiatingProcessFolderPath,InitiatingProcessG2ParentSHA1=InitiatingProcessSHA1, InitiatingProcessG2ParentId=InitiatingProcessId,  InitiatingProcessG2ParentCommandLine=InitiatingProcessCommandLine, InitiatingProcessG2ParentCreationTime=todatetime(InitiatingProcessCreationTime)
+                                ) 
+                                on DeviceId , InitiatingProcessG2ParentFileName , InitiatingProcessG2ParentId, InitiatingProcessG2ParentCreationTime
+                    | join kind=leftouter (
+                                {table_process}
+                                    | where Timestamp > ago(timeframe)
+                                    | project DeviceId, InitiatingProcessParentFileName=FileName,InitiatingProcessParentFolderPath=FolderPath,InitiatingProcessParentSHA1=SHA1, InitiatingProcessParentId=ProcessId,  InitiatingProcessParentCommandLine=ProcessCommandLine, InitiatingProcessParentCreationTime=ProcessCreationTime, 
+                                    InitiatingProcessG1ParentFileName=InitiatingProcessFileName,InitiatingProcessG1ParentFolderPath=InitiatingProcessFolderPath,InitiatingProcessG1ParentSHA1=InitiatingProcessSHA1, InitiatingProcessG1ParentId=InitiatingProcessId,  InitiatingProcessG1ParentCommandLine=InitiatingProcessCommandLine, InitiatingProcessG1ParentCreationTime=todatetime(InitiatingProcessCreationTime)
+                                    ) 
+                                    on DeviceId , InitiatingProcessG1ParentFileName , InitiatingProcessG1ParentId, InitiatingProcessG1ParentCreationTime
+                        | join kind=leftouter (
+                                    {table_process}
+                                        | where Timestamp > ago(timeframe)
+                                        | project DeviceId, InitiatingProcessFileName=FileName,InitiatingProcessSHA1=SHA1, InitiatingProcessId=ProcessId,  InitiatingProcessCommandLine=ProcessCommandLine, InitiatingProcessCreationTime=ProcessCreationTime, 
+                                        InitiatingProcessParentFileName=InitiatingProcessFileName,InitiatingProcessParentSHA1=InitiatingProcessSHA1, InitiatingProcessParentId=InitiatingProcessId,  InitiatingProcessParentCommandLine=InitiatingProcessCommandLine, InitiatingProcessParentCreationTime=InitiatingProcessCreationTime
+                                        ) 
+                                        on DeviceId , InitiatingProcessParentFileName , InitiatingProcessParentId, InitiatingProcessParentCreationTime
+                            | join kind=leftouter (
+                                        {table_process}
+                                            | where Timestamp > ago(timeframe)
+                                            | project Timestamp, DeviceId, FileName,SHA1, ProcessId, ProcessCommandLine, ProcessCreationTime, 
+                                            InitiatingProcessFileName,InitiatingProcessSHA1, InitiatingProcessId, InitiatingProcessCommandLine, InitiatingProcessCreationTime
+                                            ) 
+                                            on DeviceId , InitiatingProcessFileName , InitiatingProcessId, InitiatingProcessCreationTime
+        );
+        _process_tree_data
+        |summarize count() by FileName,InitiatingProcessFileName,InitiatingProcessParentFileName,InitiatingProcessG1ParentFileName,InitiatingProcessG2ParentFileName,InitiatingProcessG3ParentFileName,InitiatingProcessG4ParentFileName
+        | where count_ < {threshold}
+        | join kind=inner _process_tree_data on FileName,InitiatingProcessFileName,InitiatingProcessParentFileName,InitiatingProcessG1ParentFileName,InitiatingProcessG2ParentFileName,InitiatingProcessG3ParentFileName,InitiatingProcessG4ParentFileName
+        |project Timestamp=case(isnotempty(Timestamp),Timestamp,isnotempty(InitiatingProcessParentCreationTime),InitiatingProcessParentCreationTime,isnotempty(InitiatingProcessG1ParentCreationTime),InitiatingProcessG1ParentCreationTime,
+            isnotempty(InitiatingProcessG2ParentCreationTime),InitiatingProcessG2ParentCreationTime,isnotempty(InitiatingProcessG3ParentCreationTime),InitiatingProcessG3ParentCreationTime,InitiatingProcessG4ParentCreationTime),
+            count_ , DeviceId, DeviceName, 
+            InitiatingProcessG4ParentFileName,InitiatingProcessG3ParentFileName,InitiatingProcessG2ParentFileName,InitiatingProcessG1ParentFileName,InitiatingProcessParentFileName,InitiatingProcessFileName,FileName,
+            InitiatingProcessG4ParentCommandLine, InitiatingProcessG3ParentCommandLine, InitiatingProcessG2ParentCommandLine, InitiatingProcessG1ParentCommandLine, InitiatingProcessCommandLine, ProcessCommandLine,
+            InitiatingProcessG4ParentId,  InitiatingProcessG4ParentCreationTime,
+            InitiatingProcessG3ParentId, InitiatingProcessG3ParentFolderPath ,InitiatingProcessG3ParentSHA1,  InitiatingProcessG3ParentCreationTime,
+            InitiatingProcessG2ParentId,InitiatingProcessG2ParentFolderPath,InitiatingProcessG2ParentSHA1, InitiatingProcessG2ParentCreationTime,
+            InitiatingProcessG1ParentId,InitiatingProcessG1ParentFolderPath,InitiatingProcessG1ParentSHA1,  InitiatingProcessG1ParentCreationTime,
+            InitiatingProcessParentId, InitiatingProcessParentFolderPath,InitiatingProcessParentSHA1, InitiatingProcessParentCommandLine ,InitiatingProcessParentCreationTime,
+            InitiatingProcessId, InitiatingProcessSHA1,  InitiatingProcessCreationTime,
+            ProcessId, SHA1,  ProcessCreationTime
+        | order by Timestamp, DeviceName, InitiatingProcessG4ParentCreationTime , InitiatingProcessG3ParentCreationTime , InitiatingProcessG2ParentCreationTime , InitiatingProcessG1ParentCreationTime , InitiatingProcessCreationTime
+    parameters:
+      threshold:
+        description: threshold to determine what should be considered anomalous
+        type: str
+        default: "5"
+  office_applications_suspicious_child:
+    description: This query looks for office processes spawning suspicious child processes.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has_any("winword.exe", "excel.exe", "outlook.exe","powerpnt.exe","onenote.exe")
+        | where FileName has_any({suspicious_child})
+    parameters:
+      suspicious_child:
+        description: list of suspicious child processes
+        type: list
+        default:
+          - powershell
+          - rundll32
+          - cmd
+          - net
+          - wmic
+          - wscript
+          - cscript
+          - mshta
+          - regsvr32
+  web_server_applications_suspicious_child:
+    description: This query looks for office processes spawning suspicious child processes.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has_any({web_server_processes})
+        and FileName has_any({suspicious_child})
+    parameters:
+      suspicious_child:
+        description: list of suspicious child processes
+        type: list
+        default:
+          - powershell
+          - rundll32
+          - cmd
+          - net
+          - wmic
+          - wscript
+          - cscript
+          - whoami
+          - quser
+          - tracert
+          - netstat
+          - ipconfig
+          - calc
+          - mshta
+      web_server_processes:
+        description: list of suspicious child processes
+        type: list
+        default:
+          - w3wp.exe
+          - php-cgi.exe
+          - nginx.exe
+          - httpd.exe
+          - caddy.exe
+          - tomcat
+          - java.exe
+          - javaw.exe
+  process_execution_from_public_folder:
+    description: This query looks for process execution from public folder.
+    metadata:
+    args:
+      query: |-
+        {table_file}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FolderPath contains "{public_folder}"
+    parameters:
+      public_folder:
+        description: path to public folder
+        type: str
+        default:
+          - C:\Users\Public
+  security_event_log_cleared:
+    description: This query looks for the security log being cleared on a host.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "SecurityLogCleared"
+        | project Timestamp, DeviceName, ActionType
+  mshta_parent_process:
+    description: This query looks for mshta spawning a child process.
+    metadata:
+    args:
+      query: |-
+        DeviceProcessEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        and InitiatingProcessFileName =~ "mshta.exe"
+  wmiprvse_parent_process:
+    description: This query looks wmiprvse spawning a child process.
+    metadata:
+    args:
+      query: |-
+        DeviceProcessEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        and InitiatingProcessFileName has_any("wmiprvse.exe")
+  rundll32_parent_process:
+    description: This query looks rundll32 spawning a child process.
+    metadata:
+    args:
+      query: |-
+        DeviceProcessEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        and InitiatingProcessFileName has_any("rundll32.exe")
+  long_command_line:
+    description: This query looks for a long commandline from powershell or cmd.
+    metadata:
+    args:
+      query: |-
+        DeviceProcessEvents
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("powershell.exe", "cmd.exe")
+        | where strlen(ProcessCommandLine) > {size}
+    parameters:
+      size:
+        description: size of characters determined to be long
+        type: int
+        default: 100
+  clr_image_load_from_office_application:
+    description: This query looks for image load events for dotnet from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("clr.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  clr_image_load_from_common_cobalt_strike_spawnto_value:
+    description: This query looks for image load events for dotnet from a common cobalt strike spawnto.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("clr.dll")
+        | where (InitiatingProcessFileName has_any({spawnto_values}))
+    parameters:
+      spawnto_values:
+        description: List of common cobalt strike spawnto applications.
+        type: list
+        default:
+          - rundll32
+          - dllhost
+          - gpupdate
+          - mstsc
+          - explorer
+          - regsvr32
+          - rundll32
+          - svchost
+          - userinit
+          - werfault
+          - wuauclt
+          - wusa
+  dsparse_image_load_from_office_application:
+    description: This query looks for image load events for dsparse from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("dsparse.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  kerberos_image_load_from_office_application:
+    description: This query looks for image load events for kerberos from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("kerberos.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  vba_image_load_from_office_application:
+    description: This query looks for image load events for vba from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("VBE7.DLL", "VBEUI.DLL", "VBE7INTL.DLL")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  vaultcli_image_load_from_office_application:
+    description: This query looks for image load events for vaultcli from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("vaultcli.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  taskschd_image_load_from_office_application:
+    description: This query looks for image load events for taskschd from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("taskschd.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  wmi_image_load_from_office_application:
+    description: This query looks for image load events for wmi from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("wbemdisp.dll","wbemcomn.dll","wbemprox.dll","wmiutils.dll","wbemsvc.dll","fastprox.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  samlib_image_load_from_office_application:
+    description: This query looks for image load events for wmi from an office application.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("samlib.dll")
+        | where (InitiatingProcessFileName has_any({office_applications}))
+    parameters:
+      office_applications:
+        description: List of office applications.
+        type: list
+        default:
+          - winword
+          - powerpnt
+          - excel
+          - outlook
+          - onenote
+          - mspub.exe
+          - onenoteim.exe
+  regsvr32_running_file_from_temp:
+    description: This query looks for regsvr32 executing a file from temp
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName =~ "regsvr32.exe"
+        | where ProcessCommandLine has_any ( {temp_paths} )
+        | where not(ProcessCommandLine has_any (
+          "\\Local\\GoToMeeting\\", 
+          "\\Local\\Microsoft\\TeamsMeetingAddin\\"
+          ))
+    parameters:
+      temp_paths:
+        description: List of temporary paths.
+        type: list
+        default:
+          - \\temp
+          - \\tmp
+          - \\programdata\\microsoft\\
+          - \\appdata\\local
+      exclusions:
+        description: List of exclusions to define.
+        type: list
+        default:
+          - \\Local\\GoToMeeting
+          - \\Local\\Microsoft\\TeamsMeetingAddin
+  rundll32_running_file_from_temp:
+    description: This query looks for regsvr32 executing a file from temp
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName =~ "rundll32.exe"
+        | where ProcessCommandLine has_any ( {temp_paths} )
+        | where not(ProcessCommandLine has_any (
+          "\\Local\\GoToMeeting\\", 
+          "\\Local\\Microsoft\\TeamsMeetingAddin\\"
+          ))
+    parameters:
+      temp_paths:
+        description: List of temporary paths.
+        type: list
+        default:
+          - \\temp
+          - \\tmp
+          - \\programdata\\microsoft\\
+          - \\appdata\\local
+      exclusions:
+        description: List of exclusions to define.
+        type: list
+        default:
+          - \\Local\\GoToMeeting
+          - \\Local\\Microsoft\\TeamsMeetingAddin
+  possible_impacket_psexec_execution:
+    description: This query looks for regsvr32 executing a file from temp
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has "services.exe"
+        | where FolderPath matches regex "{psexec_impacket_regex}"
+    parameters:
+      psexec_impacket_regex:
+        description: Regex to detect impackets psexec.
+        type: str
+        default: C:\\\\Windows\\\\[a-zA-Z]{8}.exe
+  macro_attachment_opened_from_rare_sender:
+    description: This query looks for a macro being opened sent from a rare sender.
+    metadata:
+    args:
+      query: |-
+        let RareSenderThreshold = {RareSenderThreshold};
+        let LookupPeriod = {LookupPeriod}d;
+        let MacroExtensions = dynamic(['xlsm', 'xstm', 'docm', 'dotm', 'pptm', 'ppsm', 'xll', 'xlsb', 'doc', 'xsl', 'svg']);
+        let RareMacroSenders = {table_email_attachments}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        // Extract the file extension for each filename
+        | extend FileExtension = tostring(extract(@'.*\.(.*)', 1, FileName))
+        // Remove empty file extensions and SHA256 hashes, they will otherwise cause a lot of false positives
+        | where isnotempty(FileExtension) and isnotempty(SHA256)
+        // Filter only on marco extensions
+        | where FileExtension in~ (MacroExtensions)
+        | summarize TotalMacroAttachmentsSend = dcount(NetworkMessageId) by SenderObjectId
+        // Filter on rare senders
+        | where TotalMacroAttachmentsSend < RareSenderThreshold
+        | project SenderObjectId;
+        let RecievedMacros = {table_email_attachments}
+        | where Timestamp > ago(LookupPeriod)
+        // Filter on rare senders. Senders that often user macro's are filtered.
+        | where SenderObjectId in (RareMacroSenders)
+        // Extract the file extension for each filename
+        | extend FileExtension = tostring(extract(@'.*\.(.*)', 1, FileName))
+        // Remove empty file extensions and SHA256 hashes, they will otherwise cause a lot of false positives
+        | where isnotempty(FileExtension) and isnotempty(SHA256)
+        // Filter only on marco extensions
+        | where FileExtension in~ (MacroExtensions)
+        | project SHA256;
+        {table_file}
+        | where ActionType == 'FileCreated'
+        // Search for devices that have FileEvents with macros recieved from emails.
+        | where SHA256 in (RecievedMacros)
+        | summarize TotalDevices = dcount(DeviceName), FileLocations = make_set(FolderPath) by SHA256
+        // Collect the email events, to enrich the results. Step 4
+        | join kind=inner ({table_email_attachments} | project RecipientEmailAddress, NetworkMessageId, SHA256) on $left.SHA256 == $right.SHA256
+        | join kind=inner (EmailEvents | project SenderFromAddress, Subject, NetworkMessageId, EmailDirection) on $left.NetworkMessageId == $right.NetworkMessageId
+        // Only search for inbound mail
+        | where EmailDirection == 'Inbound'
+        | summarize ['Targeted Mailboxes'] = make_set(RecipientEmailAddress) by SHA256, TotalDevices, tostring(FileLocations), Subject, SenderFromAddress
+    parameters:
+      RareSenderThreshold:
+        description: Adjust the threshold based on your organisation.
+        type: int
+        default: 10
+      LookupPeriod:
+        description: Adjust the threshold based on your organisation.
+        type: int
+        default: 7

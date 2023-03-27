@@ -1,0 +1,81 @@
+metadata:
+  version: 1
+  description: MDE Queries around suspicious processes creation events
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_network", "MDE"]
+  tags: ["mstical_network","network"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_network:
+      description: Table Name
+      type: string
+      default: DeviceNetworkEvents
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional query clause e.g project
+      type: str
+      default: ""
+sources:
+  remote_ip_addresses_query:
+    description: Search for a list of remote IP addresses.
+    metadata:
+    args:
+      query: |- 
+        {table_network}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where RemoteIP has_any({remote_ips})
+        {add_query_items}
+    parameters:
+      remote_ips:
+        description: Process name
+        type: list
+  source_ip_addresses_query:
+    description: Search for a list of source IP addresses.
+    metadata:
+    args:
+      query: |- 
+        {table_network}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where SourceIP has_any({source_ips})
+        {add_query_items}
+    parameters:
+      source_ips:
+        description: Process name
+        type: list
+  domain_query:
+    description: Search for a list of domains.
+    metadata:
+    args:
+      query: |- 
+        {table_network}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where RemoteUrl has_any({domains})
+        {add_query_items}
+    parameters:
+      domains:
+        description: Process name
+        type: list

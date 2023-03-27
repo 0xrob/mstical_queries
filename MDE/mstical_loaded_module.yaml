@@ -1,0 +1,120 @@
+metadata:
+  version: 1
+  description: MDE Queries around loaded module creation events.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_loaded_module", "MDE"]
+  tags: ["mstical_loaded_module","loaded_module"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional query clause e.g project
+      type: str
+      default: ""
+sources:
+  image_load_query:
+    description: look for a dll loaded into a process e.g clr.dll into rundll32.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any({loaded_image})
+    parameters:
+      loaded_image:
+        description: image that was loaded
+        type: list
+  clr_image_load_query:
+    description: This query looks for image load events for dotnet.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("clr.dll")
+        | where not(InitiatingProcessFileName has_any({exclusions}))
+    parameters:
+      exclusions:
+        description: excludes for image load events
+        type: list
+        default:
+          - csc.exe
+          - powershell.exe
+  dsparse_image_load_query:
+    description: This query looks for image load events for dsparse.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("dsparse.dll")
+  kerberos_image_load_query:
+    description: This query looks for image load events for kerberos.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("kerberos.dll")
+  vba_image_load_query:
+    description: This query looks for image load events for vba.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("VBE7.DLL", "VBEUI.DLL", "VBE7INTL.DLL")
+  vaultcli_image_load_query:
+    description: This query looks for image load events from vaultcli.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("vaultcli.dll")
+  taskschd_image_load_query:
+    description: This query looks for image load events for taskschd.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("taskschd.dll")
+  wmi_image_load_query:
+    description: This query looks for image load events for wmi.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("wbemdisp.dll","wbemcomn.dll","wbemprox.dll","wmiutils.dll","wbemsvc.dll","fastprox.dll")
+  samlib_image_load_query:
+    description: This query looks for image load events for wmi.
+    metadata:
+    args:
+      query: |-
+        {table_image}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any("samlib.dll")

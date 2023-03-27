@@ -1,0 +1,147 @@
+metadata:
+  version: 1
+  description: MDE Queries around suspicious processes creation events
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_process", "MDE"]
+  tags: ["mstical_process","process"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_process:
+      description: Table Name
+      type: string
+      default: DeviceProcessEvents
+    table_image:
+      description: Table Name
+      type: string
+      default: DeviceImageLoadEvents
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional query clause e.g project
+      type: str
+      default: ""
+sources:
+  processes_query:
+    description: process creation events
+    metadata:
+    args:
+      query: |- 
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName has_any({processes})
+        {add_query_items}
+    parameters:
+      processes:
+        description: Process name
+        type: list
+  parent_processes_query:
+    description:  parent process creation events
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has_any({parent_processes})
+        {add_query_items}
+    parameters:
+      parent_processes:
+        description: Parent Process name
+        type: list
+  grand_parent_processes_query:
+    description: grand parent process creation events
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessParentFileName has_any({grand_parent_processes})
+        {add_query_items}
+    parameters:
+      grand_parent_processes:
+        description: grand parent Process name
+        type: list
+  parent_processes_and_child_query:
+    description: filter on parent and child process creation events
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where InitiatingProcessFileName has_any({parent_processes})
+        | where FileName has_any({processes})
+        {add_query_items}
+    parameters:
+      parent_processes:
+        description: Parent Process name
+        type: list
+      processes:
+        description: Process name
+        type: list
+  process_cmd_lines:
+    description: Lists all processes with a list of commandlines
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has_any({cmd_lines})
+        {add_query_items}
+    parameters:
+      cmd_lines:
+        description: Command line artifact to search for
+        type: list
+  process_injection_api_calls_query:
+    description: Look for process injection API calls being made
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})  
+        | where ActionType has_any("CreateRemoteThreadApiCall","QueueUserApcRemoteApiCall","WriteProcessMemoryApiCall","SetThreadContextRemoteApiCall")
+  process_execution_from_path_query:
+    description: process execution from specific path.
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FolderPath has_any({file_path})
+    parameters:
+      file_path:
+        description: file path of executable
+        type: list
+  named_pipes_query:
+    description: show named pipes.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "NamedPipeEvent" 
+        | extend ParsedFields=parse_json(AdditionalFields)
+        | where ParsedFields.FileOperation == "File created"
+        | project Timestamp, ActionType, DeviceName, InitiatingProcessAccountDomain, InitiatingProcessAccountName, InitiatingProcessFolderPath, InitiatingProcessCommandLine, ParsedFields.FileOperation, ParsedFields.PipeName

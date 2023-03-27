@@ -1,0 +1,69 @@
+metadata:
+  version: 1
+  description: MDE Queries based on Privilege escalation queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_registry", "MDE"]
+  tags: ["mstical_registry","registry"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_registry:
+      description: Table Name
+      type: string
+      default: DeviceRegistryEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  registry_key_set_query:
+    description: look for a registry key being set.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "RegistryValueSet"
+        | where RegistryKey has_any({registry_key})
+    parameters:
+      registry_key:
+        description: registry key
+        type: list
+  registry_key_deleted_query:
+    description: look for a registry key being deleted.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "RegistryKeyDeleted"
+        | where RegistryKey has_any({registry_key})
+    parameters:
+      registry_key:
+        description: registry key
+        type: list
+  registry_key_created_query:
+    description: look for a registry key being created.
+    metadata:
+    args:
+      query: |-
+        {table_registry}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "RegistryKeyCreated"
+        | where RegistryKey has_any({registry_key})
+    parameters:
+      registry_key:
+        description: registry key
+        type: list

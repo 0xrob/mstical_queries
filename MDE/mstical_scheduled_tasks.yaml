@@ -1,0 +1,54 @@
+metadata:
+  version: 1
+  description: MDE Queries based on Privilege escalation queries.
+  data_environments: ["MDE","M365D"]
+  data_families: ["mstical_scheduled_task", "MDE"]
+  tags: ["mstical_scheduled_task","scheduled_tasks"]
+defaults:
+  metadata:
+    data_source: "hunting_queries"
+  parameters:
+    table_device:
+      description: Table Name
+      type: string
+      default: DeviceEvents
+    start:
+      description: Query start time
+      type: datetime
+      default: -1
+    end:
+      description: Query end time
+      type: datetime
+      default: 0
+    add_query_items:
+      description: additional querie clause e.g project
+      type: str
+      default: ""
+sources:
+  scheduled_task_creation_query:
+    description: look for all scheduled task creation event.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "ScheduledTaskCreated"
+  scheduled_task_deletion_query:
+    description: look for all scheduled task being deleted.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "ScheduledTaskDeleted"
+  scheduled_task_updated_query:
+    description: look for all scheduled task being updated.
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ActionType == "ScheduledTaskUpdated"
