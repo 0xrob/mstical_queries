@@ -765,3 +765,24 @@ sources:
         description: Adjust the threshold based on your organisation.
         type: int
         default: 7
+  file_hash_with_low_prevalence:
+    description: Check for file has with low prevalence
+    args:
+      query: |-
+        {table_file}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where FileName endswith "{file_extenstion}"
+        | where ActionType == "FileCreated" 
+        | project Timestamp, DeviceName, FileName, FolderPath, SHA1
+        | invoke FileProfile("SHA1")
+        | where GlobalPrevalence < {global_prevalence}
+    parameters:
+      file_extenstion:
+        description: list of file extensions
+        type: str
+        default: .exe
+      global_prevalence:
+        description: Global prevalence value
+        type: int
+        default: 5
