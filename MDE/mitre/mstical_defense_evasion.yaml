@@ -165,3 +165,14 @@ sources:
             on Process, DLLName
             | extend DLLDir = tostring(parse_path(DLLDir).DirectoryPath)
             | join kind=leftanti HijackLibs on Process, DLLName, $left.DLLDir==$right.ExpectedLocation
+  loldriver_loaded:
+    description: This query looks for loldrivers being loaded on a host
+    metadata:
+    args:
+      query: |-
+        {table_device}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end}) 
+        | where ActionType == "DriverLoad"
+        | distinct SHA1
+        | where SHA1 in (externaldata(hash:string)["https://github.com/magicsword-io/LOLDrivers/raw/main/detections/hashes/samples.sha1"])

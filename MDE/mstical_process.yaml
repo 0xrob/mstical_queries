@@ -111,6 +111,24 @@ sources:
       cmd_lines:
         description: Command line artifact to search for
         type: list
+  process_cmd_lines_and_process_name:
+    description: Query commandline and process name
+    metadata:
+    args:
+      query: |-
+        {table_process}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where ProcessCommandLine has_any({cmd_lines})
+        | where FileName has_any({processes})
+        {add_query_items}
+    parameters:
+      cmd_lines:
+        description: Command line artifact to search for
+        type: list
+      processes:
+        description:  process artifact to search for
+        type: list
   process_injection_api_calls_query:
     description: Look for process injection API calls being made
     metadata:

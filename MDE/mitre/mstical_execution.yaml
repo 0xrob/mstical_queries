@@ -786,3 +786,21 @@ sources:
         description: Global prevalence value
         type: int
         default: 5
+  lolbas_with_outbound_internet_connection:
+    description: Check for lolbas processes connecting outbound to the internet
+    args:
+      query: |-
+        {table_network}}
+        | where Timestamp >= datetime({start})
+        | where Timestamp <= datetime({end})
+        | where RemoteIPType == "Public"
+        | where not(RemoteURL has_any ( {whitelist_domains} )
+        | where InitiatingProcessVersionInfoOriginalFileName in ((
+        externaldata ( Name:string ) [ "https://lolbas-project.github.io/api/lolbas.csv" 
+        ]
+          with (format=csv, ignoreFirstRecord=true) | distinct Name
+        ))
+    parameters:
+      whitelist_domains:
+        description: list of domains to whitelist
+        type: list
