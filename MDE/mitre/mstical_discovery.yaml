@@ -23,7 +23,7 @@ defaults:
     start:
       description: Query start time
       type: datetime
-      default: -1-[]
+      default: -1
     end:
       description: Query end time
       type: datetime
